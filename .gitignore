@@ -1,0 +1,112 @@
+# If you prefer the allow list template instead of the deny list, see community template:
+# https://github.com/github/gitignore/blob/main/community/Golang/Go.AllowList.gitignore
+
+### Go ###
+
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# The command, when built into the working tree by `go build ./bin/wsdc`.
+# Anchored with a leading slash: bin/ holds this repository's own source and must
+# not be ignored the way most Go templates do it.
+/wsdc
+
+# Test binary, built with `go test -c`
+*.test
+
+# Code coverage profiles and other test artifacts
+*.out
+coverage.*
+*.coverprofile
+profile.cov
+
+# Profiles from `go test -cpuprofile` and friends
+*.prof
+*.pprof
+
+# Dependency directories (remove the comment below to include it)
+# vendor/
+
+# Go workspace file
+go.work
+go.work.sum
+
+# env file
+.env
+
+### Vim ###
+
+# Swap files. Vim writes ".main.go.swp" beside the file being edited, and falls back
+# through .swo, .swn and so on when several sessions have it open. The bracket ranges
+# are the upstream github/gitignore patterns; the unanchored *.sw[a-p] additionally
+# covers setups configured to leave the leading dot off.
+[._]*.s[a-v][a-z]
+[._]*.sw[a-p]
+[._]s[a-rt-v][a-z]
+[._]ss[a-gi-z]
+[._]sw[a-p]
+*.sw[a-p]
+
+# Keep vector art: the swap ranges above would otherwise eat _logo.svg and the like.
+!*.svg
+
+# Session files
+Session.vim
+Sessionx.vim
+
+# Persistent undo
+[._]*.un~
+*.un~
+
+# Netrw history
+.netrwhist
+
+# Tag files from ctags/gutentags
+tags
+tags.lock
+tags.temp
+!tags/
+
+### Emacs ###
+\#*\#
+.\#*
+*~
+auto-save-list
+.dir-locals.el
+
+### Other editors and IDEs ###
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+.project
+.settings/
+*.sublime-workspace
+*.sublime-project
+.history/
+
+### OS ###
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
