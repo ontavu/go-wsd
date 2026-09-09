@@ -87,7 +87,7 @@ A diff may change these, but it must argue for it. Do not let one through silent
   to get them out of step; the Probe builder invents its own. Do not add a prefix map to a
   public signature.
 - **Finding nothing is a result, not an error** — `probe` (`wsd/discover.go:304-308`),
-  `discover` in the CLI (`bin/wsdc/main.go:107-111`), and a cap being reached. Turning any
+  `discover` in the CLI (`bin/wsdc/discover.go:71-74`), and a cap being reached. Turning any
   of those into an error is a regression, and the reverse holds too: `ErrNoListener`
   (`wsd/listen.go:115`) is exported precisely so a caller can tell "no listener could be
   opened" from `net.InterfaceByName` failing.

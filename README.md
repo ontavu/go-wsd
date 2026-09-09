@@ -81,13 +81,13 @@ devices, err := wsd.Discover(ctx, "eth0", wsd.ProbeOptions{
 })
 ```
 
-`wsdc` exposes the same thing as `-types`, comma-separated:
+`wsdc` exposes the same thing as `--types`, comma-separated, on the `discover` subcommand:
 
 ```
-wsdc discover eth0                     # every Target Service on the link
-wsdc -types onvif-nvt discover eth0    # only ONVIF video transmitters
-wsdc -types '{urn:x}Thing' discover eth0
-wsdc -h                                # lists the well-known names
+wsdc discover eth0                        # every Target Service on the link
+wsdc discover --types onvif-nvt eth0      # only ONVIF video transmitters
+wsdc discover --types '{urn:x}Thing' eth0
+wsdc -h                                   # lists the well-known names
 ```
 
 **An untyped Probe still carries an empty `d:Types` element.** WS-Discovery says an absent
@@ -139,16 +139,29 @@ deadline if you want a bound on the whole call.
 * `gosoap` builds the SOAP envelopes. Vendored from
   [jfsmig/onvif](https://github.com/jfsmig/onvif).
 
-* `bin/wsdc` a CLI tool to wrap `wsd`:
+* `bin/wsdc` a CLI tool to wrap `wsd`, built on [cobra](https://github.com/spf13/cobra):
 
   ```
-  wsdc discover eth0    # probe the link, print what answers
-  wsdc listen eth0      # print Hello and Bye until interrupted
+  wsdc discover eth0        # probe the link, print what answers
+  wsdc listen eth0          # print Hello and Bye until interrupted
+  wsdc completion bash      # a shell completion script, on stdout
   ```
 
-  Flags: `-timeout` (collection window), `-oasis11` (use the `v1.1` flavor), `-all`
-  (keep devices advertising no ONVIF port type), `-types` (comma-separated port types to
-  probe for, see above).
+  Flags: `--timeout` (collection window), `--oasis11` (use the `v1.1` flavor), `--all`
+  (keep devices advertising no ONVIF port type), `--types` (comma-separated port types to
+  probe for, see above). All four describe a Probe, so they belong to `discover` and
+  follow it on the command line; `listen` sends no Probe and rejects them.
+
+  Exit status: `0` on success, including `no device answered`; `1` when the probe or the
+  listen failed; `2` for a wrong command line — an unknown flag, verb or argument count
+  also prints the usage block on stderr, but a rejected *value* (an unknown `--types` name
+  or `help` topic) prints only the diagnostic, since the block would bury the line naming
+  what is accepted.
+
+  On a `discover` or a `listen`, stdout carries data rows and nothing else, which is what
+  keeps `wsdc discover eth0 | cut -f2` working: `no device answered` is a result and goes
+  to stderr. `--help` and `wsdc completion <shell>` are successes and print on stdout too,
+  being what was asked for.
 
 
 ## License

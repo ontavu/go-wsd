@@ -50,6 +50,13 @@ licence as the package doc comment. The real package doc lives in `wsd/doc.go`; 
   exists, so `wsd.Device` is owned by `wsd`. `go list -deps ./wsd` must show no
   first-party package beyond `gosoap` and `wsd/transport`.
 
+- **`cobra` stops at `bin/wsdc`.** The command tree, the exit statuses and the help text
+  are the CLI's business. `wsd`, `wsd/transport` and `gosoap` must not import `cobra` or
+  `pflag`: `go list -deps ./wsd ./gosoap | grep spf13` must print nothing. It is there for
+  the per-verb flag sets and for `--help` answered as a success on stdout, not for
+  testability: `run(ctx, args, stdout, stderr) int` is the seam the tests use, and it owes
+  nothing to cobra.
+
 - **Parsing paths drop, they do not fail or panic.** Datagrams are unauthenticated
   multicast from any host on the link. `etree` reports no error and leaves the root nil
   on non-XML input, so `documentRoot` returns nil and every caller checks it —
