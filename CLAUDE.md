@@ -1,61 +1,81 @@
 # CLAUDE.md
 
-Read [README.md](README.md) first. It covers the protocol, the two WS-Discovery flavors,
-the `wsd` API, the `wsdc` CLI and the package layout — do not restate any of it here.
+The instructions for this repository are agent-agnostic and live in @AGENTS.md.
+Read them first: the commands, the licence-header rules and the conventions all apply
+in full. `README.md` comes before both — it owns the protocol, the two flavors, the
+`wsd` API, the `wsdc` CLI and the package layout.
 
-This file records only what the README does not: the commands, and the conventions for
-changing the code.
+## Claude-specific directives
 
-## Commands
+### The review panel
 
-```sh
-go build ./...
-go vet ./...
-go test -race ./...
-gofmt -l .                      # must print nothing
-go run ./bin/wsdc discover lo   # smoke-test the CLI
-```
+CI never sees a device. `.github/workflows/ci.yml` formats, vets, tests and builds, but
+nothing on it can multicast a Probe at a camera or a printer, and the tests that need a
+multicast listener skip themselves when they cannot open one. Every claim about what
+equipment does is either pinned by a test over a canned datagram or recorded as a
+measurement in `README.md`. Correctness therefore rests on review, so this repository
+keeps five specialised reviewers in `.claude/agents/`:
 
-`.github/workflows/ci.yml` gates on all five. `-race` is not optional here: `Listen`
-runs a goroutine per IP family, and both read paths unblock a blocked reader by moving
-its socket deadline from another goroutine.
-
-## Licence header on every new `.go` file
-
-Copy the copyright line and the MIT SPDX line from an existing file — `wsd/device.go`
-is the plain case. Six files carry an extra provenance line between the copyright and
-the SPDX line, and which one depends on where the file lives:
-
-| Path | Extra provenance line |
+| Agent | Owns |
 | --- | --- |
-| `gosoap/*` | derives from `github.com/jfsmig/onvif`, MIT, © 2018 Yakovlev Dmitry, Zhorzh Palanjyan, Crazybber |
-| `wsd/discover.go`, `wsd/ws-discovery.go` | derives from the ws-discovery project, © 2018 Palanjyan Zhorzhik |
-| everything else | none |
+| `wsd-protocol` | Bytes on the wire: the two WS-Discovery versions, SOAP 1.2 and `mustUnderstand` qualification, WS-Addressing, SOAP-over-UDP §4, `urn:uuid`, QName and namespace resolution, the discovery groups. |
+| `untrusted-input` | The one hostile boundary: parse-and-drop discipline, nil roots, the retention and complexity bounds, which advertised addresses are let through, observed sender versus claimed identity, and what reaches a terminal. |
+| `runtime-safety` | Concurrency and resource lifetime: the two ways a blocked read is unblocked, watchdog ordering, channel close ordering, context propagation, and the sockets and memberships a call holds. |
+| `go-architect` | The `AGENTS.md` rulebook and design coherence, including the `wsd` dependency boundary and the deliberate decisions (the `prober` seam, the narrow `PacketConn`, finding nothing is not an error). |
+| `cli-ux` | `wsdc` as an interface — flags, usage text, exit codes, the tab-separated output contract — and whether `README.md`, `wsd/doc.go` and `AGENTS.md` still describe the code. |
 
-**Keep the blank line between the notice and `package X`.** Without it Go takes the
-licence as the package doc comment. The real package doc lives in `wsd/doc.go`; see
-`wsd/device.go:4-5` for the spacing.
+**All five are read-only** (`disallowedTools: Write, Edit, NotebookEdit`), so they are safe
+to run in parallel on one diff — launch them in a single message. They report; the main
+session applies the fixes.
 
-## Conventions
+They do not all run on the same model, and the split is deliberate. `wsd-protocol` and
+`cli-ux` are pinned to `sonnet`: both work from a checklist their own file spells out, one
+against clause numbers and one against three documents that drift. The other three stay on
+`inherit`, because their job is to invent the failure rather than look it up — which
+datagram panics the parser, which interleaving races, whether a design belongs here at all.
+Prompt caching does not cover subagents, so each reviewer pays full price for its own
+context on every run; that is what the cheaper pair is buying back. Raise one to `inherit`
+if it starts missing findings, and say in its file why.
 
-- **`bin/` is source, not build output.** `bin/wsdc/` holds the CLI. Do not add `bin/`
-  to `.gitignore` the way most Go templates do — the built binary is ignored as `/wsdc`.
+### Which to reach for
 
-- **Comments explain why, and cite the spec.** The house style carries clause numbers:
-  `SOAP-over-UDP 1.1 section 4`, `SOAP 1.2 Part 1 section 5.2.3`, `ONVIF Core section
-  7.3.6`, `RFC 4122`. A comment restating what the next line does is out of place.
+By what the change touches:
 
-- **`wsd` must not depend on an ONVIF client type.** Discovery runs before any client
-  exists, so `wsd.Device` is owned by `wsd`. `go list -deps ./wsd` must show no
-  first-party package beyond `gosoap` and `wsd/transport`.
+- `wsd/ws-discovery.go`, `wsd/flavor.go`, `wsd/types.go` → `wsd-protocol`
+- `wsd/parse.go` → `wsd-protocol` **and** `untrusted-input`, always: it is both the
+  namespace resolver and the trust filter
+- `wsd/discover.go`, `wsd/listen.go` → `runtime-safety`, and `untrusted-input` if a bound,
+  a cap or a parsed field moved
+- `wsd/transport/` → `runtime-safety` and `wsd-protocol`
+- `bin/wsdc/`, `README.md`, `wsd/doc.go` → `cli-ux`
+- `gosoap/` → `wsd-protocol` for the envelope, `go-architect` for the vendored-code rules
+- a new `.go` file, a new package, interface, exported symbol or dependency →
+  `go-architect`
+- any new `go func`, channel, deadline or socket → `runtime-safety`
+- anything that parses, prints or stores a value taken from a datagram →
+  `untrusted-input`, always
 
-- **Parsing paths drop, they do not fail or panic.** Datagrams are unauthenticated
-  multicast from any host on the link. `etree` reports no error and leaves the root nil
-  on non-XML input, so `documentRoot` returns nil and every caller checks it —
-  dereferencing it would be a panic any host on the link could trigger.
+Non-trivial diffs get the whole panel. Do not invoke one to rubber-stamp work another has
+already reviewed — they are deliberately non-overlapping, and each will say so and
+redirect if handed something outside its remit.
 
-- Prefer short methods or functions. Prefer comments of functions instead of comments
-  of lines or blocks. Always comment in English.
+### A finding arrives as a test
 
-- libraries in this repository should not `log.Print*` anything. If really necessary, any 
-  debug trace should be emitted via a configurable logger. 
+This repository has a habit worth keeping: the tests are as long as the code, and each one
+records what went wrong once. `TestParseAnnouncementHostileInput` and
+`TestParseProbeMatchesHostileInput` are tables of malformed datagrams;
+`TestReadRepliesBoundsRetainedBytes` pins a retention cap;
+`BenchmarkParseProbeMatchesCrafted` is the standing measurement behind the scope memo;
+`TestProbeMustUnderstandIsQualified` pins one clause of SOAP 1.2;
+`TestDiscoverRecordsReplySource` pins observed-versus-claimed with an actual forger;
+`TestOrDashKeepsHostileFieldsInTheirColumn` pins the terminal-injection filter;
+`TestNoStandardLogger` keeps `gosoap` from reporting to a logger its caller never chose.
+
+So a reviewer's finding is not finished as prose. Where it can be pinned, it comes with the
+test written out, in the style of the target package, with a comment saying what the slip
+was and what it was verified against — a clause number, or a measurement. Two seams exist
+so that this needs no hardware: `prober` (`wsd/discover.go:177`) for the aggregation path
+and `fakeConn` (`wsd/discover_test.go:19`) for the socket path. Use them; a test that
+needs an interface belongs behind a `t.Skipf` like `TestListenStopsOnContextCancel`.
+
+Apply the test with the fix, in the same change.

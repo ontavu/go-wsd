@@ -59,7 +59,7 @@ The zero value works. Everything below is a refinement.
 
 | Field | Default | Purpose |
 | --- | --- | --- |
-| `Timeout` | 5s | Collection window. Raised to `MatchTimeout` (1.1s) if lower: a device may wait up to 1s before it even starts answering. |
+| `Timeout` | 3s | Collection window. Raised to `MatchTimeout` (1.1s) if lower: a device may wait up to 1s before it even starts answering. |
 | `Attempts` | 3 | Multicast transmissions, per `MULTICAST_UDP_REPEAT + 1` of SOAP-over-UDP §4, spaced by a randomised backoff. |
 | `HopLimit` | 1 | Multicast TTL. Discovery is a link-local concern. |
 | `PortTypes`, `Scopes` | empty | Narrow the Probe. Matching is **conjunctive**, so listing several selects fewer devices, not more. |
@@ -147,7 +147,8 @@ deadline if you want a bound on the whole call.
   ```
 
   Flags: `-timeout` (collection window), `-oasis11` (use the `v1.1` flavor), `-all`
-  (keep devices advertising no ONVIF port type).
+  (keep devices advertising no ONVIF port type), `-types` (comma-separated port types to
+  probe for, see above).
 
 
 ## License
