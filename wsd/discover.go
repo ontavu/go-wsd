@@ -70,6 +70,28 @@ const (
 	// DefaultProbeTimeout bounds how long replies to a probe are collected.
 	DefaultProbeTimeout = 3 * time.Second
 
+	// MaxProbeTimeout is the longest collection window one exchange can ask for. A larger
+	// Timeout is lowered to it.
+	//
+	// The number is arbitrary; the bound is not. A Timeout of 99999h, typed once or read
+	// from a configuration file, left readReplies collecting for years. maxReplies and
+	// maxReplyBytes cap what is retained, but they do not cap the reads: a datagram that
+	// fills the buffer is dropped without advancing either, so a host answering every
+	// Probe with maximum-size datagrams keeps the loop copying bufSize at a time for the
+	// whole window and retains nothing. The window is the only thing that ends that, and
+	// before this bound it did not end.
+	//
+	// Ninety seconds is thirty times DefaultProbeTimeout, and far beyond what a
+	// conformant exchange needs at the defaults: the last of three copies leaves within
+	// 750ms of the first, udpMinDelay doubling and capped at udpUpperDelay, and a Target
+	// Service answers within appMaxDelay of receiving it.
+	//
+	// It bounds one exchange, not the call. probe runs one exchange per IP family in
+	// sequence, so a dual-stack interface pays the window once per family, and transmit
+	// finishes before readReplies opens it, so Attempts adds to it as well. Only ctx
+	// bounds the whole call.
+	MaxProbeTimeout = 90 * time.Second
+
 	// DefaultProbeAttempts is how many probe messages are multicast, matching the
 	// MULTICAST_UDP_REPEAT + 1 transmissions of SOAP-over-UDP.
 	DefaultProbeAttempts = multicastUDPRepeat + 1
@@ -104,8 +126,10 @@ func sourceOf(addr net.Addr) netip.AddrPort {
 
 // ProbeOptions tunes a WS-Discovery probe. The zero value selects the defaults above.
 type ProbeOptions struct {
-	// Timeout is the collection window. Values below MatchTimeout are raised to it:
-	// a shorter window would systematically miss conformant devices.
+	// Timeout is the collection window of one exchange, bounded at both ends. Values
+	// below MatchTimeout are raised to it, since a shorter window would systematically
+	// miss conformant devices; values above MaxProbeTimeout are lowered to it. One
+	// exchange runs per IP family, in sequence, so this is not a bound on the call.
 	Timeout time.Duration
 
 	// Attempts is how many probe messages are multicast.
@@ -144,6 +168,11 @@ func (o ProbeOptions) timeout() time.Duration {
 	}
 	if o.Timeout < MatchTimeout {
 		return MatchTimeout
+	}
+	// Lowered rather than refused. Like maxReplies, this is a bound and reaching it is a
+	// result: the caller gets what was collected, and a longer search is another probe.
+	if o.Timeout > MaxProbeTimeout {
+		return MaxProbeTimeout
 	}
 	return o.Timeout
 }
@@ -358,6 +387,14 @@ func transmit(ctx context.Context, conn transport.PacketConn, dst net.Addr, data
 
 // readReplies collects datagrams until the window closes or the context is done.
 func readReplies(ctx context.Context, conn transport.PacketConn, window time.Duration) ([]reply, error) {
+	// The ceiling again, at the one place the window becomes a socket deadline.
+	// ProbeOptions.timeout() already applies it, but nothing pins that its only caller
+	// keeps calling it: replacing opts.timeout() with opts.Timeout in exchange leaves the
+	// whole suite green, and a window that bypassed the normalisation would hold this
+	// socket and its group membership for as long as it asked.
+	if window > MaxProbeTimeout {
+		window = MaxProbeTimeout
+	}
 	deadline := time.Now().Add(window)
 	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
 		deadline = ctxDeadline

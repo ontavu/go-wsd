@@ -59,7 +59,7 @@ The zero value works. Everything below is a refinement.
 
 | Field | Default | Purpose |
 | --- | --- | --- |
-| `Timeout` | 3s | Collection window. Raised to `MatchTimeout` (1.1s) if lower: a device may wait up to 1s before it even starts answering. |
+| `Timeout` | 3s | Collection window of one exchange, bounded at both ends. Raised to `MatchTimeout` (1.1s) if lower: a device may wait up to 1s before it even starts answering. Lowered to `MaxProbeTimeout` (90s) if higher. One exchange runs per IP family, so a dual-stack interface pays it once per family. |
 | `Attempts` | 3 | Multicast transmissions, per `MULTICAST_UDP_REPEAT + 1` of SOAP-over-UDP §4, spaced by a randomised backoff. |
 | `HopLimit` | 1 | Multicast TTL. Discovery is a link-local concern. |
 | `PortTypes`, `Scopes` | empty | Narrow the Probe. Matching is **conjunctive**, so listing several selects fewer devices, not more. |
@@ -122,16 +122,21 @@ so treat `DeviceServiceURL` as an address you were given, not one you trust.
 the one field that was observed rather than told.
 
 Volume is bounded as well as content: a probe retains a limited number of datagrams and a
-limited number of bytes. The timeout bounds the window in which replies are collected;
-they are parsed once it closes, and that stops when the context is done — so give `ctx` a
-deadline if you want a bound on the whole call.
+limited number of bytes, per exchange. The timeout bounds the window in which replies are
+collected, and is itself capped at `MaxProbeTimeout` (90s): without a ceiling one mistyped
+duration kept a socket, a multicast membership and a read loop busy for years. None of
+these bounds the whole call — one exchange runs per IP family, `Attempts` transmissions
+finish before the window opens, and replies are parsed after it closes — so give `ctx` a
+deadline if you want a bound on the call itself.
 
 
 ## Code organization
 
 * `wsd` is a golang library doing the very basic job of web-service discovery: building
   and multicasting Probes, collecting and correlating the replies, and reporting the
-  Hello and Bye announcements.
+  Hello and Bye announcements. `ProbeableInterfaceNames` answers the question that comes
+  before all of that — which of a host's interfaces are worth the call — and is the one
+  thing in the package that is policy rather than protocol.
 
 * `wsd/transport` is the multicast plumbing, IPv4 and IPv6, behind one connection
   interface.

@@ -52,12 +52,18 @@
 // observed rather than claimed: the endpoint reference and the addresses inside a
 // datagram are whatever its sender chose to write.
 //
-// Volume is bounded as well as content. A probe retains a limited number of datagrams and
-// a limited number of bytes, and stops collecting once either is reached. Reaching a
-// limit is a result and not an error: what was collected is returned.
+// Volume is bounded as well as content. One exchange retains a limited number of datagrams
+// and a limited number of bytes, and stops collecting once either is reached. Reaching a
+// limit is a result and not an error: what was collected is returned. The bounds are per
+// exchange and a probe runs one per IP family, in sequence, so a dual-stack interface
+// admits each of them once per family.
 //
-// [ProbeOptions.Timeout] bounds the collection window and nothing else. The replies are
-// parsed once it closes, and that phase ends when ctx is done, so a caller wanting a
-// bound on the whole call has to give ctx a deadline: parsing everything the caps admit
-// takes seconds when the link is full of crafted replies.
+// [ProbeOptions.Timeout] bounds the collection window of one exchange and nothing else,
+// and is itself bounded: a value above [MaxProbeTimeout] is lowered to it, so no Timeout
+// can ask a socket and a multicast membership to be held indefinitely. It is not a bound
+// on the call: one exchange runs per IP family, [ProbeOptions.Attempts] is unbounded and
+// its transmissions finish before the window opens, and the replies are parsed after it
+// closes. Only ctx bounds the whole of it, so a caller who needs one has to give ctx a
+// deadline — parsing everything the caps admit takes seconds when the link is full of
+// crafted replies.
 package wsd

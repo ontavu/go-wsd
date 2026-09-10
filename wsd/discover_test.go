@@ -6,6 +6,7 @@ package wsd
 
 import (
 	"context"
+	"math"
 	"net"
 	"os"
 	"sync"
@@ -28,11 +29,41 @@ type fakeConn struct {
 	// the test rather than failing it.
 	endless []byte
 	served  int
+
+	// deadlines records every SetReadDeadline, which is how the collection window is
+	// observed: the deadline is its only externally visible consequence.
+	deadlines []time.Time
 }
 
 const endlessLimit = 4 * maxReplies
 
-func (c *fakeConn) SetReadDeadline(time.Time) error { return nil }
+// SetReadDeadline records rather than honours: the collection loop is ended here by the
+// retention caps or by the queue running dry. The watchdog writes this from its own
+// goroutine, which is why the mutex is not optional.
+func (c *fakeConn) SetReadDeadline(t time.Time) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.deadlines = append(c.deadlines, t)
+	return nil
+}
+
+// firstDeadline is the collection window as it reached the socket, before any watchdog
+// moved it.
+func (c *fakeConn) firstDeadline() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.deadlines) == 0 {
+		return time.Time{}
+	}
+	return c.deadlines[0]
+}
+
+// reads is how many datagrams the loop consumed, retained or dropped.
+func (c *fakeConn) reads() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.served
+}
 
 func (c *fakeConn) WriteTo(b []byte, _ net.Addr) (int, error) {
 	c.mu.Lock()
@@ -273,6 +304,37 @@ func TestProbeOptionsTimeoutFloor(t *testing.T) {
 	}
 }
 
+// TestProbeOptionsTimeoutCeiling is the guard for the other end of the window. The floor
+// protects the result; this protects the caller. Replies are retained until the window
+// closes, and maxReplies and maxReplyBytes bound what that costs in memory, but nothing
+// bounded how long the call held its socket and its multicast membership: a Timeout of
+// 99999h, typed once or read from a configuration file, collected for years.
+//
+// Lowered rather than refused, the way reaching maxReplies is a result and not an error.
+func TestProbeOptionsTimeoutCeiling(t *testing.T) {
+	for _, given := range []time.Duration{
+		MaxProbeTimeout + 1,
+		2 * MaxProbeTimeout,
+		99999 * time.Hour,
+		time.Duration(math.MaxInt64),
+	} {
+		if got := (ProbeOptions{Timeout: given}).timeout(); got != MaxProbeTimeout {
+			t.Errorf("timeout() = %v for %v, want MaxProbeTimeout %v", got, given, MaxProbeTimeout)
+		}
+	}
+	// A window inside the bounds is honoured untouched, at either edge.
+	for _, given := range []time.Duration{MatchTimeout, 5 * time.Second, MaxProbeTimeout} {
+		if got := (ProbeOptions{Timeout: given}).timeout(); got != given {
+			t.Errorf("timeout() = %v for %v, want it honoured", got, given)
+		}
+	}
+	// The three constants have to stay ordered, or one bound silently eats another.
+	if MatchTimeout > DefaultProbeTimeout || DefaultProbeTimeout > MaxProbeTimeout {
+		t.Errorf("MatchTimeout %v, DefaultProbeTimeout %v and MaxProbeTimeout %v are out of order",
+			MatchTimeout, DefaultProbeTimeout, MaxProbeTimeout)
+	}
+}
+
 // TestDeviceOfPreservesSchemeAndPath is the regression guard for the discovered address:
 // reducing XAddrs to a host forced every device onto http and /onvif/device_service.
 func TestDeviceOfPreservesSchemeAndPath(t *testing.T) {
@@ -375,4 +437,55 @@ func loopback(t *testing.T) *net.Interface {
 	}
 	t.Skip("no loopback interface available")
 	return nil
+}
+
+// TestReadRepliesCapsTheWindowAtTheDeadline pins MaxProbeTimeout where it has an effect,
+// rather than only on the option that computes it.
+//
+// TestProbeOptionsTimeoutCeiling exercises ProbeOptions.timeout(), which no test pins as
+// being called: replacing exchange's opts.timeout() with opts.Timeout leaves the whole
+// suite green, and with it a 99999h window, a zero-length one for the zero value, and no
+// MatchTimeout floor. The window only ever escapes as a socket read deadline, so that is
+// where the ceiling is checked.
+func TestReadRepliesCapsTheWindowAtTheDeadline(t *testing.T) {
+	conn := &fakeConn{}
+	before := time.Now()
+	if _, err := readReplies(context.Background(), conn, 99999*time.Hour); err != nil {
+		t.Fatalf("readReplies: %v", err)
+	}
+	deadline := conn.firstDeadline()
+	if deadline.IsZero() {
+		t.Fatal("readReplies set no read deadline: the window bounds nothing")
+	}
+	// The slack absorbs the scheduling between before and the Add inside readReplies;
+	// what is caught is a window orders of magnitude too large, not a microsecond.
+	if window := deadline.Sub(before); window > MaxProbeTimeout+time.Second {
+		t.Errorf("the socket deadline is %v out, want at most MaxProbeTimeout %v", window, MaxProbeTimeout)
+	}
+}
+
+// TestReadRepliesReadsOnPastDroppedOversizeDatagrams is a characterisation, not a bound:
+// it records that the retention caps do not bound the reads.
+//
+// A datagram that fills the buffer is dropped rather than handed on as mangled XML, and
+// the drop advances neither len(result) nor retained, so the loop condition is unchanged
+// by it. A host on the link that answers every Probe with maximum-size datagrams keeps
+// this loop reading and copying bufSize at a time for the whole window, and collects
+// nothing. The window is the only thing that ends it, which is what MaxProbeTimeout now
+// bounds — and is the reason that constant exists.
+func TestReadRepliesReadsOnPastDroppedOversizeDatagrams(t *testing.T) {
+	conn := &fakeConn{endless: make([]byte, bufSize)}
+
+	got, err := readReplies(context.Background(), conn, 30*time.Second)
+	if err != nil {
+		t.Fatalf("readReplies: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("retained %d datagrams, want none: every one filled the buffer", len(got))
+	}
+	// fakeConn gives up after endlessLimit reads so that this fails as a number rather
+	// than hanging. Reaching it is the point: neither cap ended the loop.
+	if conn.reads() != endlessLimit {
+		t.Errorf("the loop stopped after %d reads; a cap now bounds the dropped ones", conn.reads())
+	}
 }
