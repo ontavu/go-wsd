@@ -30,7 +30,7 @@ recorded as a measurement in `README.md`. Conformance therefore rests on you.
 - **SOAP 1.2 Part 1** — the envelope `gosoap/soap-builder.go:232-245` builds, and
   section 5.2.3 for `mustUnderstand`.
 - **SOAP-over-UDP 1.1 section 4** — the retransmission schedule, `wsd/discover.go:47-58`
-  and `transmit` at `wsd/discover.go:339`.
+  and `transmit` at `wsd/discover.go:368`.
 - **RFC 4122** — `urn:uuid`, `wsd/parse.go:29-36`.
 - **ONVIF Core** — cited for the parts ONVIF pins down rather than WS-Discovery:
   section 7.1 (URN:UUID over the WS-Discovery 2.6 recommendation), 7.2 and 7.3.5
@@ -73,7 +73,7 @@ Check each against the current tree; do not assume this list is still complete.
   counter-specification line in the repository and the best documented; do not let a diff
   "correct" it.
 - **Types matching is conjunctive.** Naming several port types narrows the result. That is
-  why neither ONVIF type is probed for by default (`wsd/discover.go:117-126`) and why
+  why neither ONVIF type is probed for by default (`wsd/discover.go:141-150`) and why
   `isOnvifDevice` (`wsd/parse.go:227`) accepts *either* local name.
 - **QNames resolve against the declarations in scope at the `d:Types` element itself**,
   its own attributes included — `typesOf`, `wsd/parse.go:137`. Resolving against the
@@ -86,7 +86,7 @@ Check each against the current tree; do not assume this list is still complete.
 - **A reply is correlated on `wsa:RelatesTo`** carrying our `[message id]`
   (`wsd/parse.go:55`, `relatesTo` at `:99`). Correlation is not authentication — the
   Probe is multicast, so the identifier is known to the whole link. `SendProbe`
-  (`wsd/discover.go:265`) returns payloads a caller *cannot* correlate, and says so.
+  (`wsd/discover.go:294`) returns payloads a caller *cannot* correlate, and says so.
 - **Reception is dialect-agnostic**: `FindElements` paths use local names only
   (`./Body/ProbeMatches/ProbeMatch`, `./Body/Hello`, `./Body/Bye`), so one parser serves
   both versions and `Listen` needs no flavor. A path that hardcodes a prefix is a finding.

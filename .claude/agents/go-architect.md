@@ -77,7 +77,7 @@ An import that crosses those the wrong way is a finding.
 
 A diff may change these, but it must argue for it. Do not let one through silently.
 
-- **`prober` exists only as a test seam** (`wsd/discover.go:173-177`). One implementation,
+- **`prober` exists only as a test seam** (`type prober` in `wsd/discover.go`). One implementation,
   `probe`; the indirection is what makes correlation, filtering and deduplication testable
   without a socket. It is not an extension point — do not let it grow into one, and do not
   let anyone delete it as a one-implementation interface.
@@ -93,17 +93,16 @@ A diff may change these, but it must argue for it. Do not let one through silent
   means nothing outside the document declaring it, so making a caller supply both was a way
   to get them out of step; the Probe builder invents its own. Do not add a prefix map to a
   public signature.
-- **Finding nothing is a result, not an error** — `probe` (`wsd/discover.go:304-308`),
-  `discover` in the CLI (`bin/wsdc/discover.go:71-74`), and a cap being reached. Turning any
-  of those into an error is a regression, and the reverse holds too: `ErrNoListener`
-  (`wsd/listen.go:115`) is exported precisely so a caller can tell "no listener could be
+- **Finding nothing is a result, not an error** — `probe`'s "finding nothing is a result" branch,
+  `discover` in the CLI (its `found == 0` branch), and a cap being reached. Turning any
+  of those into an error is a regression, and the reverse holds too: `ErrNoListener` is exported precisely so a caller can tell "no listener could be
   opened" from `net.InterfaceByName` failing.
 - **`gosoap` is vendored, not written here.** It derives from `jfsmig/onvif` under MIT and
   keeps its own shape: dead-looking commented XML samples (`gosoap/ws-security.go:51-60`),
   `Xlmns`-era naming, capitalised parameter names in `generateToken` (`:124`). Do not
   tidy it for style; keep changes minimal and traceable, and do not delete the WS-Security
   code because `wsd` has no caller for it — the package is a shared vendored surface.
-- **`reply.payload` is a `string`, not `[]byte`** (`wsd/discover.go:86`): it is handed
+- **`reply.payload` is a `string`, not `[]byte`** (`type reply` in `wsd/discover.go`): it is handed
   straight to `etree.ReadFromString` and is immutable once collected.
 
 ## How to review a design

@@ -2,14 +2,18 @@
 //
 // SPDX-License-Identifier: MIT
 
-// Command wsdc discovers WS-Discovery devices on a network interface.
+// Command wsdc discovers WS-Discovery devices on the interfaces named, or on every
+// interface a device can plausibly answer on when none is named.
 //
-//	wsdc discover eth0        probe the link and print what answers
-//	wsdc listen eth0          print Hello and Bye until interrupted
-//	wsdc completion bash      a shell completion script, on stdout
+//	wsdc discover                probe every probeable interface, in parallel
+//	wsdc discover eth0 wlan0     probe only these two
+//	wsdc listen                  print Hello and Bye until interrupted
+//	wsdc completion bash         a shell completion script, on stdout
 //
 // The four probe flags configure a Probe, so they belong to discover and follow it:
 // wsdc discover --types onvif-nvt eth0. Listen sends no Probe and takes none of them.
+// --all-interfaces widens the automatic interface set and is unrelated to --all, which
+// keeps devices advertising no ONVIF port type.
 package main
 
 import (
@@ -28,6 +32,13 @@ import (
 	"github.com/jfsmig/go-wsd/wsd"
 )
 
+// The two cobra verbs this command has to name. Cobra keeps its own unexported copies,
+// and getting either wrong would silently stop claimCompletionCmd from claiming anything.
+const (
+	compCmdName = "completion"
+	helpCmdName = "help"
+)
+
 func main() {
 	// Interrupting is the normal way to end a listen, so it must not look like a crash.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -44,9 +55,7 @@ func main() {
 // at runtime, and 0 otherwise — including finding no device. It is separate from main so
 // that a test can read the status and both streams without spawning a process.
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	root := newRootCmd()
-	root.SetOut(stdout)
-	root.SetErr(stderr)
+	root := newRootCmd(stdout, stderr)
 	// Cobra reads os.Args[1:] when SetArgs is given nil, which under "go test" is the
 	// test binary's own flags — it exempts only a binary named cobra.test (cobra 1.10.2
 	// command.go:1104-1107). An empty slice is what a bare wsdc means.
@@ -81,6 +90,15 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		}
 		return 2
 	}
+	// __complete and __completeNoDesc are cobra's protocol for the generated shell
+	// scripts, and they validate their own arguments with a plain error, which would
+	// otherwise read here as a probe that failed. They cannot be reached any earlier:
+	// cobra builds them inside Execute and removes them again unless one is the verb being
+	// run (cobra 1.10.2 completions.go:230-300, the removal at :298). A shell always
+	// passes a command line; a human typing the verb bare still typed a wrong one.
+	if cmd.Name() == cobra.ShellCompRequestCmd || cmd.Name() == cobra.ShellCompNoDescRequestCmd {
+		return 2
+	}
 	return 1
 }
 
@@ -106,28 +124,38 @@ func usagef(format string, args ...any) error {
 	return usageError{err: fmt.Errorf(format, args...), usage: true}
 }
 
-// newRootCmd builds the command tree. A constructor rather than package variables, and
-// that freshness is load-bearing twice over. A cobra command holds the state of one parse:
+// newRootCmd builds the command tree on one pair of streams. The streams are arguments
+// rather than something the caller sets afterwards because the completion group captures
+// the writer once, when it is built (cobra 1.10.2 completions.go:798), and hands that one
+// copy to each generator: a tree built before SetOut would generate "wsdc completion bash"
+// to os.Stdout for ever after. claimCompletionCmd therefore comes last, below.
+//
+// It is a constructor rather than package variables, and that freshness is load-bearing
+// twice over. A cobra command holds the state of one parse:
 // the flag values, and the context. Cobra hands the context to a child only while the
 // child's own is nil (cobra 1.10.2 command.go:1145) and never clears it, so a tree that
 // outlives one run gives the next run the previous context — SIGINT would then cancel a
 // context nobody watches, and wsd.Listen holds one socket and one group membership per IP
 // family until the context it was given ends. A package-level tree, which is what
 // cobra-cli scaffolds, is the whole regression.
-func newRootCmd() *cobra.Command {
+func newRootCmd(stdout, stderr io.Writer) *cobra.Command {
 	root := &cobra.Command{
-		Use:   "wsdc discover|listen <interface>",
-		Short: "Discover WS-Discovery devices on a network interface",
+		Use:   "wsdc discover|listen [interface...]",
+		Short: "Discover WS-Discovery devices on the network interfaces of a host",
 		Long: "wsdc probes a link for WS-Discovery devices, or watches it for the Hello and Bye\n" +
-			"a device multicasts when it joins or leaves.\n" +
+			"a device multicasts when it joins or leaves. Name no interface and every one a\n" +
+			"device can plausibly answer on is used.\n" +
 			"\n" + portTypeHelp(),
 		// Every row shows a flag behind its verb. That is not decoration: a flag in front
 		// of the verb fails, and a boolean fails without a hint, since cobra guesses the
-		// unknown --all consumes the next word and so never sees discover at all.
-		Example: "  wsdc discover eth0                     # every Target Service on the link\n" +
+		// unknown --all or --all-interfaces consumes the next word and so never sees
+		// discover at all. Both booleans appear here for that reason.
+		Example: "  wsdc discover                          # every interface a device can answer on\n" +
+			"  wsdc discover eth0 wlan0               # only these two, in parallel\n" +
 			"  wsdc discover --types onvif-nvt eth0   # only ONVIF video transmitters\n" +
 			"  wsdc discover --all eth0               # keep non-ONVIF devices too\n" +
-			"  wsdc listen eth0                       # Hello and Bye until interrupted",
+			"  wsdc discover --all-interfaces         # container and VM interfaces too\n" +
+			"  wsdc listen                            # Hello and Bye until interrupted",
 		// "wsdc [flags]" is not an invocation: the flags belong to discover.
 		DisableFlagsInUseLine: true,
 		// run is the only writer of either stream and the owner of the exit status. Cobra
@@ -159,7 +187,7 @@ func newRootCmd() *cobra.Command {
 	// whether Find consumed the topic instead, so a wrong topic is a wrong command line
 	// like any other.
 	root.SetHelpCommand(&cobra.Command{
-		Use:   "help [command]",
+		Use:   helpCmdName + " [command]",
 		Short: "Help about any command",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			target, rest, err := cmd.Root().Find(args)
@@ -168,7 +196,7 @@ func newRootCmd() *cobra.Command {
 				// so it is answered the way a wrong --types value is: name what is
 				// accepted, and leave out the usage block that would bury the list.
 				return usageError{err: fmt.Errorf("unknown help topic %q: try one of %s",
-					strings.Join(args, " "), strings.Join(helpTopics(cmd.Root()), ", ")), usage: false}
+					strings.Join(args, " "), strings.Join(childNames(cmd.Root()), ", ")), usage: false}
 			}
 			return target.Help()
 		},
@@ -178,7 +206,58 @@ func newRootCmd() *cobra.Command {
 		return usageError{err: err, usage: true}
 	})
 	root.AddCommand(newDiscoverCmd(), newListenCmd())
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+	// Last, for the writer the group captures — see above.
+	claimCompletionCmd(root)
 	return root
+}
+
+// claimCompletionCmd builds the completion group early and gives it something to run.
+//
+// Cobra builds it inside Execute (cobra 1.10.2 command.go:1113 calling
+// completions.go:769), where it cannot be reached, and a group with nothing to run goes to
+// its help with status 0 (command.go:955) — so "wsdc completion" and "wsdc completion
+// no-such-shell" both answered a wrong command line with a success on stdout. Building it
+// here claims the name, and Execute then finds one present and leaves it alone, so the
+// group answers a missing or unknown shell the way the rest of the tree does. Its four
+// children, which do the generating, are cobra's own.
+//
+// It has to run after the real verbs are added: with none of them present cobra treats the
+// group as the only subcommand and removes it again unless it is being called
+// (completions.go:782-796).
+func claimCompletionCmd(root *cobra.Command) {
+	root.InitDefaultCompletionCmd()
+	completion, _, err := root.Find([]string{compCmdName})
+	if err != nil || completion.Name() != compCmdName {
+		return
+	}
+	needsShell := func(cmd *cobra.Command, args []string) error {
+		// Reaching the group itself means no child matched the shell name.
+		return usageError{err: fmt.Errorf("%s needs a shell: one of %s",
+			compCmdName, strings.Join(childNames(cmd), ", "))}
+	}
+	completion.Args = needsShell
+	// Cobra gives each generator Args: NoArgs (completions.go:825,862,890,912), whose
+	// error is plain, so "wsdc completion bash junk" reported a wrong command line as a
+	// probe that failed. This command owns the group's statuses now, children included.
+	for _, shell := range completion.Commands() {
+		accept := shell.Args
+		if accept == nil {
+			continue
+		}
+		shell.Args = func(cmd *cobra.Command, args []string) error {
+			if err := accept(cmd, args); err != nil {
+				return usageError{err: err, usage: true}
+			}
+			return nil
+		}
+	}
+	// A group cobra cannot run goes to its help with status 0 (command.go:955), and that
+	// check precedes ValidateArgs (command.go:968), so the group needs a RunE to reach
+	// Args at all. Args rejects every call that gets this far, which makes this provably
+	// unreachable until cobra stops validating first — do not delete it as dead.
+	completion.RunE = needsShell
 }
 
 // helpTemplate prints Long after the usage block rather than before it, which is the order
@@ -190,15 +269,17 @@ const helpTemplate = `{{if or .Runnable .HasSubCommands}}{{.UsageString}}{{end}}
 {{with (or .Long .Short)}}{{. | trimTrailingWhitespaces}}
 {{end}}`
 
-// helpTopics lists what "wsdc help" accepts, which is every verb the tree publishes.
-func helpTopics(root *cobra.Command) []string {
-	var topics []string
-	for _, cmd := range root.Commands() {
-		if cmd.IsAvailableCommand() || cmd.Name() == "help" {
-			topics = append(topics, cmd.Name())
+// childNames lists the subcommands a command publishes: the topics "wsdc help" accepts
+// when asked of the root, and the shells "wsdc completion" accepts when asked of the
+// completion group. help is named explicitly because cobra does not count it as available.
+func childNames(parent *cobra.Command) []string {
+	var names []string
+	for _, cmd := range parent.Commands() {
+		if cmd.IsAvailableCommand() || cmd.Name() == helpCmdName {
+			names = append(names, cmd.Name())
 		}
 	}
-	return topics
+	return names
 }
 
 // portTypeHelp is the part of the help no flag description can carry: the names --types
@@ -213,17 +294,6 @@ func portTypeHelp() string {
 		"Naming several narrows the probe rather than widening it: WS-Discovery matches\n"+
 		"types conjunctively, so a device must implement all of them to answer.",
 		strings.Join(wsd.WellKnownTypeNames(), ", "))
-}
-
-// exactlyOneInterface stands in for cobra.ExactArgs(1), which returns a plain error: run
-// would report a wrong argument count as a failure at runtime and exit 1. It also names
-// the argument rather than counting it, since a reader who forgot the interface needs the
-// word and not the number; the usage block printed underneath gives the form.
-func exactlyOneInterface(cmd *cobra.Command, args []string) error {
-	if len(args) != 1 {
-		return usagef("%s takes exactly one interface name", cmd.Name())
-	}
-	return nil
 }
 
 // orDash prepares a field of a device for a tab-separated row: a dash when it is

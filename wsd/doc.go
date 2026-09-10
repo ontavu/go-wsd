@@ -38,6 +38,13 @@
 // reports the Hello and Bye a device multicasts when it joins or leaves. A Probe alone
 // cannot observe a departure.
 //
+// Both take one interface name. [ProbeableInterfaceNames] answers the question that comes
+// before that — which of a host's interfaces are worth the call — and is the one thing here
+// that is about interface selection rather than the protocol: up, not the loopback,
+// multicast-capable, and not a container, VM or overlay device by name. It is pure over the
+// list it is given, so a caller passes net.Interfaces() and the policy stays testable from
+// a synthetic list.
+//
 // # Untrusted input
 //
 // Every datagram on this path arrives unauthenticated over UDP multicast from any host

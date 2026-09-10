@@ -54,15 +54,15 @@ A flood is indistinguishable from a busy link, so reaching a bound is a *result*
 error, and is not reported (`wsd/discover.go:28-45`).
 
 - `bufSize` 64 KiB (`wsd/discover.go:26`), and a datagram that fills the buffer is
-  **dropped**, not truncated into invalid XML — `wsd/discover.go:398` and
+  **dropped**, not truncated into invalid XML — `wsd/discover.go:435` and
   `wsd/listen.go:145`.
 - `maxReplies` 512 and `maxReplyBytes` 8 MiB (`wsd/discover.go:40,44`) bound one exchange.
   The measurement behind them: a two-second window against maximum-size datagrams
   retained 218 MiB and took minutes to parse. Collection **stops** at a cap rather than
-  reading on and discarding (`wsd/discover.go:388`). Pinned by
-  `TestReadRepliesBoundsRetainedDatagrams` and `...RetainedBytes` (`wsd/discover_test.go:187,202`).
+  reading on and discarding (`wsd/discover.go:425`). Pinned by
+  `TestReadRepliesBoundsRetainedDatagrams` and `...RetainedBytes` (`wsd/discover_test.go:218,233`).
 - **Parsing happens after the window closes, and the context has to stop it too** —
-  `wsd/discover.go:189-196`. Without that check `Timeout` bounded nothing: a 100 ms
+  `wsd/discover.go:218-225`. Without that check `Timeout` bounded nothing: a 100 ms
   deadline was observed returning after 17 s. Pinned by
   `TestDiscoverStopsParsingWhenContextEnds` (`wsd/discover_agg_test.go:195`).
 - **Algorithmic cost is part of the attack surface.** `nsScopes` (`wsd/parse.go:260-312`)
@@ -104,11 +104,11 @@ reference, the types and the addresses are all claims a sender makes about itsel
   (`wsd/discover_agg_test.go:149`) asserts exactly this, with a forger answering from
   `10.0.0.99` while advertising `10.0.0.2`.
 - `reply` carries payload and source together as far as the `Device`
-  (`wsd/discover.go:83-89`) so that they cannot be separated in between.
-- A UUID from a datagram is the deduplication key (`dedupKey`, `wsd/discover.go:244`),
+  (`wsd/discover.go:105-111`) so that they cannot be separated in between.
+- A UUID from a datagram is the deduplication key (`dedupKey`, `wsd/discover.go:273`),
   which means a hostile host can collapse or split entries. That is inherent; know it
   before any change that gives a UUID more authority than that.
-- `sourceOf` (`wsd/discover.go:94`) unmaps a 4-in-6 address, and yields the zero value
+- `sourceOf` (`wsd/discover.go:116`) unmaps a 4-in-6 address, and yields the zero value
   rather than a guess for anything that is not a UDP address.
 
 ## 5. What reaches a terminal
@@ -116,13 +116,13 @@ reference, the types and the addresses are all claims a sender makes about itsel
 `bin/wsdc` prints tab-separated rows in which every field but the timestamp and the sender
 came from a datagram.
 
-- `orDash` (`bin/wsdc/main.go:145`) replaces every non-`unicode.IsGraphic` rune with
+- `orDash` (`bin/wsdc/main.go`) replaces every non-`unicode.IsGraphic` rune with
   U+FFFD. XML parsing already refuses a raw escape byte and a character reference to one,
   which rules out colour and cursor sequences; **a tab or a newline is ordinary character
   data and forges a column or a whole row**, and a format character such as U+202E
   reorders a line without contributing a glyph. Replaced, not dropped, so a field cannot
   be made to read as a different one. Pinned by
-  `TestOrDashKeepsHostileFieldsInTheirColumn` (`bin/wsdc/main_test.go:21`).
+  `TestOrDashKeepsHostileFieldsInTheirColumn` (`bin/wsdc/main_test.go`).
 - **Every new printed field goes through `orDash` and into that table.** Grep the diff for
   `fmt.Print` on every review.
 - Nothing in the libraries logs (`AGENTS.md`: no `log.Print*`), which also means no payload,
@@ -142,4 +142,4 @@ break"** — both are worth reporting and they are not the same finding.
 
 State whether you ran `go test -race ./...` and the benchmark, and what they reported.
 Where a finding can be pinned, write the test out: a case added to the hostile-input table
-of the package it belongs to, or a bound asserted the way `wsd/discover_test.go:187` does.
+of the package it belongs to, or a bound asserted the way `wsd/discover_test.go:218` does.

@@ -7,9 +7,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/netip"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode"
@@ -140,9 +145,6 @@ func TestExitStatusSeparatesUsageFromRuntime(t *testing.T) {
 	}{
 		{"no argument", nil, 2, "a command is required"},
 		{"unknown command", []string{"probe", "lo"}, 2, `unknown command "probe"`},
-		{"no interface", []string{"discover"}, 2, "discover takes exactly one interface name"},
-		{"two interfaces", []string{"discover", "lo", "eth0"}, 2, "discover takes exactly one interface name"},
-		{"listen with no interface", []string{"listen"}, 2, "listen takes exactly one interface name"},
 		{"unknown flag", []string{"discover", "--flavor", "lo"}, 2, "unknown flag: --flavor"},
 		{"flag without a value", []string{"discover", "--timeout"}, 2, "needs an argument"},
 		{"bad port type", []string{"discover", "--types", "camera", "lo"}, 2, "unknown port type"},
@@ -161,6 +163,20 @@ func TestExitStatusSeparatesUsageFromRuntime(t *testing.T) {
 		// listen sends no Probe. The flag package accepted all four here and ignored them,
 		// which cost a run and a reread of the output to notice.
 		{"probe flag on listen", []string{"listen", "--timeout", "5s", "lo"}, 2, "unknown flag: --timeout"},
+
+		// A negative duration was never a request. The library reads any Timeout at or
+		// below zero as "use the default", so this used to run a silent three-second probe.
+		{"negative timeout", []string{"discover", "--timeout=-5s", "lo"}, 2, "must not be negative"},
+		// Cobra builds the completion group with nothing to run, which used to answer both
+		// of these with its own help on stdout and status 0.
+		{"completion with no shell", []string{"completion"}, 2, "needs a shell"},
+		{"completion with an unknown shell", []string{"completion", "no-such-shell"}, 2, "needs a shell"},
+		// Cobra's generators carry Args: NoArgs, whose error is plain, so a spare word
+		// after the shell name read as a probe that failed.
+		{"completion with a shell and a spare word", []string{"completion", "bash", "junk"}, 2, "unknown command"},
+		// Cobra's protocol verb for the generated shell scripts validates its arguments
+		// with a plain error, which read here as a probe that failed.
+		{"the completion protocol with no command line", []string{"__complete"}, 2, "requires at least 1 arg"},
 
 		{"unknown interface", []string{"discover", "no-such-interface"}, 1, "no such network interface"},
 
@@ -258,7 +274,7 @@ func TestHelpListsThePortTypeNames(t *testing.T) {
 // would inherit it as a persistent flag and go back to accepting one it cannot honour.
 func TestListenDeclaresNoProbeFlag(t *testing.T) {
 	commands := map[string]*cobra.Command{}
-	root := newRootCmd()
+	root := newRootCmd(io.Discard, io.Discard)
 	for _, cmd := range root.Commands() {
 		commands[cmd.Name()] = cmd
 	}
@@ -306,6 +322,17 @@ func TestDiagnosticsKeepArgvOutOfTheControlChannel(t *testing.T) {
 		{"unknown help topic", []string{"help", forgery}},
 		{"rejected flag value", []string{"discover", "--types", forgery, "lo"}},
 		{"newline in a flag name", []string{"discover", "--x\nurn:uuid:a\tb", "lo"}},
+		// pflag has a fourth message that interpolates argv, "invalid argument %q for %q
+		// flag: %v" (flag.go:1060), reached by any typed value it parses itself. --timeout
+		// is the only such flag here; --types is parsed by us.
+		{"unparsable flag value", []string{"discover", "--timeout", forgery, "lo"}},
+		// completion rejects an unknown shell by naming the shells it has, not the one it
+		// was given. This pins that choice: a message "improved" to quote the bad name
+		// would put argv back on the control channel.
+		{"unknown completion shell", []string{"completion", forgery}},
+		// The negative --timeout diagnostic prints a parsed time.Duration, whose String
+		// alphabet cannot carry a control byte. This pins that it stays parsed.
+		{"negative timeout", []string{"discover", "--timeout=-5s", forgery}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			code, stdout, stderr := runWSDC(tc.args...)
@@ -355,9 +382,11 @@ func TestRowsKeepHostileFieldsInTheirColumns(t *testing.T) {
 		columns int
 		print   func(io.Writer)
 	}{
-		{"discover", 2, func(w io.Writer) { printDevice(w, hostile) }},
-		{"listen", 5, func(w io.Writer) {
-			printAnnouncement(w, time.Unix(0, 0).UTC(),
+		// The interface leads both rows and is hostile here too: it reaches them from
+		// argv, so it is the one column a caller can choose the bytes of.
+		{"discover", 3, func(w io.Writer) { printDevice(w, forgery, hostile) }},
+		{"listen", 6, func(w io.Writer) {
+			printAnnouncement(w, forgery, time.Unix(0, 0).UTC(),
 				wsd.Announcement{Kind: wsd.KindHello, Device: hostile, Types: []string{forgery}})
 		}},
 	} {
@@ -395,10 +424,9 @@ func TestRowsKeepHostileFieldsInTheirColumns(t *testing.T) {
 // its help with status 0, which is why the root declares a RunE and why the generated help
 // command was replaced.
 //
-// One line escapes the rule and is left alone: "wsdc completion" with no shell named prints
-// its own help on stdout with status 0, because the generated command is built inside
-// Execute and cannot be constrained from here. That is stock cobra, the same in every tool
-// built on it, and the verb is documented in README.md.
+// Nothing escapes the rule any more. "wsdc completion" with no shell named used to print
+// its own help here on stdout with status 0, because cobra builds that group inside Execute
+// with nothing to run; claimCompletionCmd builds it first so that it answers like a verb.
 func TestOnlyRequestedOutputReachesStdout(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
@@ -414,6 +442,8 @@ func TestOnlyRequestedOutputReachesStdout(t *testing.T) {
 		// These are wrong command lines, and none of them is data.
 		{"an unknown help topic", []string{"help", "no-such-command"}, false},
 		{"an unknown command", []string{"no-such-command"}, false},
+		{"completion with no shell", []string{"completion"}, false},
+		{"completion with an unknown shell", []string{"completion", "no-such-shell"}, false},
 		{"a bare wsdc", nil, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -468,10 +498,10 @@ func TestBooleanFlagBeforeSubcommandTeachesTheFix(t *testing.T) {
 // (wsd/listen.go:63-67). A package-level tree, which is what cobra-cli scaffolds, is the
 // whole regression.
 func TestEveryRunBuildsItsOwnCommandTree(t *testing.T) {
-	if newRootCmd() == newRootCmd() {
+	if newRootCmd(io.Discard, io.Discard) == newRootCmd(io.Discard, io.Discard) {
 		t.Fatal("newRootCmd returns a shared tree; a second run would inherit the first run's context")
 	}
-	for _, cmd := range newRootCmd().Commands() {
+	for _, cmd := range newRootCmd(io.Discard, io.Discard).Commands() {
 		if cmd.Context() != nil {
 			t.Errorf("%s carries a context before execution", cmd.Name())
 		}
@@ -479,7 +509,7 @@ func TestEveryRunBuildsItsOwnCommandTree(t *testing.T) {
 
 	// The characterisation half: this is the cobra behaviour that makes freshness
 	// load-bearing. If it ever changes, the guard above is no longer the thing to keep.
-	root := newRootCmd()
+	root := newRootCmd(io.Discard, io.Discard)
 	var seen []context.Context
 	root.AddCommand(&cobra.Command{
 		Use: "record",
@@ -501,3 +531,408 @@ func TestEveryRunBuildsItsOwnCommandTree(t *testing.T) {
 }
 
 type runKey struct{}
+
+// TestRejectedValuesNeverDragTheUsageBlockAlong extends the guard in
+// TestWrongCommandLinePrintsTheUsageBlockOnStderr to the rejections added with
+// MaxProbeTimeout and claimCompletionCmd. Each is a rejected value rather than a command
+// line the reader got wrong, so the usage block would only bury the line naming what is
+// accepted — and for __complete it would describe machinery nobody types by hand.
+func TestRejectedValuesNeverDragTheUsageBlockAlong(t *testing.T) {
+	for _, args := range [][]string{
+		{"discover", "--timeout=-5s", "lo"},
+		{"completion"},
+		{"completion", "no-such-shell"},
+		{"__complete"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			code, stdout, stderr := runWSDC(args...)
+			if code != 2 || stdout != "" {
+				t.Fatalf("run(%q) = %d, stdout %q, want 2 and nothing", args, code, stdout)
+			}
+			if strings.Contains(stderr, "Usage:") {
+				t.Errorf("run(%q) dragged the usage block along:\n%s", args, stderr)
+			}
+			if strings.TrimSpace(stderr) == "" {
+				t.Errorf("run(%q) rejected the value silently", args)
+			}
+		})
+	}
+}
+
+// upIface is a synthetic interface carrying the flags a probeable link has, so that the
+// no-argument path is exercised without depending on the host running the test.
+func upIface(name string) net.Interface {
+	return net.Interface{Name: name, Flags: net.FlagUp | net.FlagMulticast}
+}
+
+// listing is an enumerator over a fixed interface list.
+func listing(interfaces ...net.Interface) enumerator {
+	return func() ([]net.Interface, error) { return interfaces, nil }
+}
+
+// TestInterfacesToPollTrustsWhatWasNamed pins the one asymmetry in the resolution: the
+// policy drops the loopback, and "wsdc discover lo" has to keep working anyway. A name a
+// caller typed is a decision already taken, so the filter is consulted only when none was.
+func TestInterfacesToPollTrustsWhatWasNamed(t *testing.T) {
+	// A host whose only usable interface would be filtered out, plus the loopback the
+	// policy never selects. Naming either still polls it.
+	host := listing(
+		net.Interface{Name: "lo", Flags: net.FlagUp | net.FlagLoopback | net.FlagMulticast},
+		upIface("docker0"),
+	)
+
+	for _, tc := range []struct {
+		name        string
+		args        []string
+		all         bool
+		wantNames   []string
+		wantSkipped []string
+	}{
+		{"the loopback, named", []string{"lo"}, false, []string{"lo"}, nil},
+		{"a filtered name, named", []string{"docker0"}, false, []string{"docker0"}, nil},
+		{"named twice", []string{"eth0", "eth0"}, false, []string{"eth0"}, nil},
+		{"order is kept", []string{"wlan0", "eth0"}, false, []string{"wlan0", "eth0"}, nil},
+		// Nothing named: the policy decides, and says what it dropped.
+		{"nothing named", nil, false, nil, []string{"docker0"}},
+		{"nothing named, all interfaces", nil, true, []string{"docker0"}, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			names, skipped, err := interfacesToPoll(tc.args, tc.all, host)
+			if err != nil {
+				t.Fatalf("interfacesToPoll: %v", err)
+			}
+			if !slices.Equal(names, tc.wantNames) {
+				t.Errorf("names = %v, want %v", names, tc.wantNames)
+			}
+			if !slices.Equal(skipped, tc.wantSkipped) {
+				t.Errorf("skipped = %v, want %v", skipped, tc.wantSkipped)
+			}
+		})
+	}
+}
+
+// TestNamingAnInterfaceNeedsNoEnumeration pins that the syscall is made only when policy
+// has to choose. A name is a decision already taken, and a host whose interface table
+// cannot be read must still be able to probe the interface its operator typed.
+func TestNamingAnInterfaceNeedsNoEnumeration(t *testing.T) {
+	unreadable := func() ([]net.Interface, error) {
+		t.Error("enumerated the interfaces although one was named")
+		return nil, errors.New("unreadable")
+	}
+	names, skipped, err := interfacesToPoll([]string{"eth0"}, false, unreadable)
+	if err != nil || !slices.Equal(names, []string{"eth0"}) || skipped != nil {
+		t.Fatalf("interfacesToPoll = %v, %v, %v; want [eth0], nil, nil", names, skipped, err)
+	}
+}
+
+// TestNothingToPollTellsTheOperatorWhichEmptinessItIs pins the distinction, because only
+// one of the two cases has a way around it: advising --all-interfaces to someone whose only
+// interface is the loopback would be advice that cannot work. Neither is an error — having
+// nothing to poll is a result, like finding no device.
+func TestNothingToPollTellsTheOperatorWhichEmptinessItIs(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		skipped []string
+		want    string
+		absent  string
+	}{
+		{"nothing was a candidate", nil, "none is both up and non-loopback", "--all-interfaces"},
+		{"everything was filtered", []string{"docker0", "veth0"}, "--all-interfaces", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var diag bytes.Buffer
+			reportNothingToPoll(&diag, tc.skipped)
+			if !strings.Contains(diag.String(), tc.want) {
+				t.Errorf("said %q, want it to contain %q", diag.String(), tc.want)
+			}
+			if tc.absent != "" && strings.Contains(diag.String(), tc.absent) {
+				t.Errorf("recommends %q, which cannot help this host: %q", tc.absent, diag.String())
+			}
+		})
+	}
+}
+
+// TestSelectionIsReportedOnlyWhenSomethingWasFiltered keeps the line to the runs it
+// explains. On a host with no virtual devices there is nothing to explain, and a line on
+// every run would be noise.
+func TestSelectionIsReportedOnlyWhenSomethingWasFiltered(t *testing.T) {
+	var quiet bytes.Buffer
+	reportSelection(&quiet, []string{"eth0"}, nil)
+	if quiet.Len() != 0 {
+		t.Errorf("said %q with nothing skipped", quiet.String())
+	}
+
+	var spoken bytes.Buffer
+	reportSelection(&spoken, []string{"eth0"}, []string{"docker0", "veth0"})
+	for _, want := range []string{"eth0", "skipped 2", "--all-interfaces"} {
+		if !strings.Contains(spoken.String(), want) {
+			t.Errorf("said %q, want it to contain %q", spoken.String(), want)
+		}
+	}
+}
+
+// TestDiscoverKeepsInterfaceOrderAndSurvivesOneFailure is one of the two guards on the
+// fan-out. The rows come out in the order the interfaces were named whatever order the
+// probes finished in — the first interface here answers last on purpose, so a version that
+// printed on completion would fail. And one interface failing must not lose the others,
+// the rule probe already applies to the IP families of one interface.
+func TestDiscoverKeepsInterfaceOrderAndSurvivesOneFailure(t *testing.T) {
+	send := func(_ context.Context, iface string, _ wsd.ProbeOptions) ([]wsd.Device, error) {
+		switch iface {
+		case "slow0":
+			time.Sleep(50 * time.Millisecond)
+			return []wsd.Device{{UUID: "urn:uuid:slow"}}, nil
+		case "broken0":
+			return nil, errors.New("no multicast listener")
+		default:
+			return []wsd.Device{{UUID: "urn:uuid:fast"}}, nil
+		}
+	}
+
+	var out, diag bytes.Buffer
+	err := discover(context.Background(), &out, &diag,
+		[]string{"slow0", "broken0", "fast0"}, wsd.ProbeOptions{}, send)
+	if err != nil {
+		t.Fatalf("discover = %v, want nil: one interface failing must not lose the others", err)
+	}
+	want := "slow0\turn:uuid:slow\t-\nfast0\turn:uuid:fast\t-\n"
+	if out.String() != want {
+		t.Errorf("stdout =\n%q\nwant\n%q", out.String(), want)
+	}
+	if !strings.Contains(diag.String(), "broken0: no multicast listener") {
+		t.Errorf("stderr = %q, want the failing interface named", diag.String())
+	}
+}
+
+// TestDiscoverProbesEveryInterfaceAtOnce pins the reason the fan-out exists. Ordering is
+// preserved by the slice, so the test above passes on a sequential discover too — verified
+// by deleting the wg.Go. A barrier rather than a stopwatch: every probe blocks until all of
+// them have been entered, which cannot happen unless they overlap, and cannot flake on a
+// loaded machine.
+func TestDiscoverProbesEveryInterfaceAtOnce(t *testing.T) {
+	const interfaces = 4
+	var entered sync.WaitGroup
+	entered.Add(interfaces)
+	all := make(chan struct{})
+	send := func(context.Context, string, wsd.ProbeOptions) ([]wsd.Device, error) {
+		entered.Done()
+		select {
+		case <-all:
+		case <-time.After(2 * time.Second):
+			t.Error("the probes never overlapped: the fan-out is sequential")
+		}
+		return nil, nil
+	}
+	go func() {
+		entered.Wait()
+		close(all)
+	}()
+
+	if err := discover(context.Background(), io.Discard, io.Discard,
+		[]string{"a0", "b0", "c0", "d0"}, wsd.ProbeOptions{}, send); err != nil {
+		t.Fatalf("discover: %v", err)
+	}
+}
+
+// TestEveryInterfaceFailingNamesOneOfThem pins the all-failed path of both verbs, which
+// disagreed once: listen printed the failure it was also returning, so the first arrived
+// twice, and discover named none of the interfaces at all. The rule is one line per
+// failure, and the returned one names its interface whenever there was a choice.
+func TestEveryInterfaceFailingNamesOneOfThem(t *testing.T) {
+	send := func(context.Context, string, wsd.ProbeOptions) ([]wsd.Device, error) {
+		return nil, wsd.ErrNoListener
+	}
+	watchOn := func(context.Context, string) (<-chan wsd.Announcement, error) {
+		return nil, wsd.ErrNoListener
+	}
+
+	for _, tc := range []struct {
+		verb string
+		run  func(out, diag io.Writer) error
+	}{
+		{"discover", func(out, diag io.Writer) error {
+			return discover(context.Background(), out, diag, []string{"a0", "b0"}, wsd.ProbeOptions{}, send)
+		}},
+		{"listen", func(out, diag io.Writer) error {
+			return listen(context.Background(), out, diag, []string{"a0", "b0"}, watchOn)
+		}},
+	} {
+		t.Run(tc.verb, func(t *testing.T) {
+			var out, diag bytes.Buffer
+			err := tc.run(&out, &diag)
+			if err == nil {
+				t.Fatal("every interface failed and it reported success")
+			}
+			if out.Len() != 0 {
+				t.Errorf("wrote %q on stdout", out.String())
+			}
+			// Once, counting the returned error the way run prints it.
+			said := strings.Count(diag.String()+err.Error(), wsd.ErrNoListener.Error())
+			if said != 1 {
+				t.Errorf("reported it %d times, want once: stderr %q, err %v", said, diag.String(), err)
+			}
+			if !strings.Contains(err.Error(), "a0") {
+				t.Errorf("err = %v, want the interface it is reporting named", err)
+			}
+		})
+	}
+}
+
+// TestDiscoverTreatsAnInterruptAsAResult pins the asymmetry the fan-out nearly lost.
+// wsd.Discover hands back what it collected and reports ctx.Err() only when that is
+// nothing, so a cancelled probe is a result with no device — the way it is for listen —
+// and not a status 1. Before this, ^C during a probe that had found nothing yet exited 1
+// with "context canceled", because every interface had "failed".
+func TestDiscoverTreatsAnInterruptAsAResult(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	send := func(ctx context.Context, _ string, _ wsd.ProbeOptions) ([]wsd.Device, error) {
+		return nil, ctx.Err()
+	}
+
+	var out, diag bytes.Buffer
+	if err := discover(ctx, &out, &diag, []string{"a0", "b0"}, wsd.ProbeOptions{}, send); err != nil {
+		t.Fatalf("discover = %v, want nil: interrupting is the normal way to stop early", err)
+	}
+	if out.Len() != 0 {
+		t.Errorf("wrote %q on stdout", out.String())
+	}
+}
+
+// TestListenMergesEveryInterface pins the fan-in: every stream reaches stdout labelled with
+// the interface it was read on, and the merge ends when the sources close.
+func TestListenMergesEveryInterface(t *testing.T) {
+	watchOn := func(_ context.Context, iface string) (<-chan wsd.Announcement, error) {
+		if iface == "broken0" {
+			return nil, wsd.ErrNoListener
+		}
+		out := make(chan wsd.Announcement, 1)
+		out <- wsd.Announcement{Kind: wsd.KindHello, Device: wsd.Device{UUID: "urn:uuid:" + iface}}
+		close(out)
+		return out, nil
+	}
+
+	var out, diag bytes.Buffer
+	if err := listen(context.Background(), &out, &diag, []string{"a0", "broken0", "b0"}, watchOn); err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	// The order two merged streams interleave in is not a contract, so the rows are
+	// checked for presence and shape rather than sequence.
+	for _, want := range []string{"a0\t", "b0\t", "urn:uuid:a0", "urn:uuid:b0"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("stdout does not contain %q:\n%s", want, out.String())
+		}
+	}
+	for _, row := range strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n") {
+		if got := len(strings.Split(row, "\t")); got != 6 {
+			t.Errorf("row %q has %d columns, want 6", row, got)
+		}
+	}
+	if !strings.Contains(diag.String(), "broken0:") {
+		t.Errorf("stderr = %q, want the interface that could not be opened", diag.String())
+	}
+}
+
+// TestListenReturnsWhenTheContextEndsEvenIfASourceStaysOpen pins this command's half of the
+// shutdown. wsd.Listen closes its channel when ctx is done and TestListenStopsOnContextCancel
+// verifies that — but only where a multicast listener can be opened, so on CI nothing does.
+// The merge must not be the only thing standing between SIGINT and an exit: the range over
+// merged ends only when every forwarder returns, so one source that stayed open would make
+// wsdc ignore SIGINT and need a SIGKILL.
+func TestListenReturnsWhenTheContextEndsEvenIfASourceStaysOpen(t *testing.T) {
+	watchOn := func(context.Context, string) (<-chan wsd.Announcement, error) {
+		return make(chan wsd.Announcement), nil // never closes
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = listen(ctx, io.Discard, io.Discard, []string{"a0", "b0"}, watchOn)
+	}()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("listen did not return after the context was cancelled")
+	}
+}
+
+// TestPerInterfaceFailuresKeepArgvOutOfTheControlChannel is the counterpart of
+// TestDiagnosticsKeepArgvOutOfTheControlChannel for the diagnostics the fan-out added.
+// That table cannot hold these: every row of it opens by requiring status 2, and these
+// lines are printed on the runs that end in 0 or 1.
+//
+// The failing interface is echoed to stderr on the runs where another one answered. Those
+// names come from the host when no argument was given but from argv when one was, and argv
+// is not always typed: a wrapper interpolating a name from an inventory hands those bytes
+// to the terminal. ESC [2K CR erases the diagnostic and rewrites the line; a newline forges
+// a whole one. Interface names really can carry a C0 control — dev_valid_name rejects
+// whitespace and slashes, not ESC — so this is not only an argv question.
+func TestPerInterfaceFailuresKeepArgvOutOfTheControlChannel(t *testing.T) {
+	const forgery = "\x1b[2K\rwsdc: urn:uuid:trusted\thttp://10.0.0.1/onvif/device_service"
+
+	// Both fakes embed the name in the error, the way a wrapped net.InterfaceByName
+	// failure does, so the second filter is exercised as well as the first.
+	send := func(_ context.Context, iface string, _ wsd.ProbeOptions) ([]wsd.Device, error) {
+		if iface == "good0" {
+			return []wsd.Device{{UUID: "urn:uuid:real"}}, nil
+		}
+		return nil, fmt.Errorf("%s: no such network interface", iface)
+	}
+	watchOn := func(_ context.Context, iface string) (<-chan wsd.Announcement, error) {
+		if iface == "good0" {
+			out := make(chan wsd.Announcement)
+			close(out)
+			return out, nil
+		}
+		return nil, fmt.Errorf("%s: no such network interface", iface)
+	}
+
+	for _, tc := range []struct {
+		name string
+		run  func(out, diag io.Writer) error
+	}{
+		{"discover, one of two failed", func(out, diag io.Writer) error {
+			return discover(context.Background(), out, diag,
+				[]string{forgery, "good0"}, wsd.ProbeOptions{}, send)
+		}},
+		{"listen, one of two failed", func(out, diag io.Writer) error {
+			return listen(context.Background(), out, diag, []string{forgery, "good0"}, watchOn)
+		}},
+		// Every interface failed, so the name travels out through run's own line instead,
+		// which is where graphicOnly is applied.
+		{"discover, every interface failed", func(out, diag io.Writer) error {
+			err := discover(context.Background(), out, diag,
+				[]string{forgery}, wsd.ProbeOptions{}, send)
+			fmt.Fprintf(diag, "wsdc: %s\n", graphicOnly(err.Error()))
+			return nil
+		}},
+		{"listen, every interface failed", func(out, diag io.Writer) error {
+			err := listen(context.Background(), out, diag, []string{forgery}, watchOn)
+			fmt.Fprintf(diag, "wsdc: %s\n", graphicOnly(err.Error()))
+			return nil
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out, diag bytes.Buffer
+			if err := tc.run(&out, &diag); err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			// Each diagnostic stays on its own line: a newline in the name forges another,
+			// and a forged line reads as a device.
+			if got := strings.Count(strings.TrimSuffix(diag.String(), "\n"), "\n"); got > 0 {
+				t.Fatalf("the diagnostics run to %d lines:\n%q", got+1, diag.String())
+			}
+			for _, r := range diag.String() {
+				if r != '\n' && !unicode.IsGraphic(r) {
+					t.Fatalf("U+%04X reaches the terminal in %q", r, diag.String())
+				}
+			}
+			// Replaced rather than dropped, so one name cannot be made to read as another.
+			if !strings.Contains(diag.String(), "�") {
+				t.Errorf("nothing was replaced, so the name was not scrubbed:\n%q", diag.String())
+			}
+		})
+	}
+}
