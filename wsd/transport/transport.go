@@ -62,7 +62,14 @@ func (t Target) GroupAddr() net.Addr {
 // ListenMulticast joins the discovery group of this target on an interface and returns a
 // connection that receives the unsolicited Hello and Bye announcements.
 func (t Target) ListenMulticast(iface *net.Interface) (*net.UDPConn, error) {
-	return net.ListenMulticastUDP(t.network, iface, &net.UDPAddr{IP: t.group, Port: discoveryPort})
+	conn, err := net.ListenMulticastUDP(t.network, iface, &net.UDPAddr{IP: t.group, Port: discoveryPort})
+	if err != nil {
+		return nil, err
+	}
+	// Without this the socket is delivered datagrams that arrived on other interfaces, so
+	// a caller listening on two of them cannot tell which link an announcement came from.
+	restrictToJoinedGroups(conn, t.group.To4() == nil)
+	return conn, nil
 }
 
 var (
