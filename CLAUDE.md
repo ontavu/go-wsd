@@ -94,8 +94,8 @@ records what went wrong once. `TestParseAnnouncementHostileInput` and
 So a reviewer's finding is not finished as prose. Where it can be pinned, it comes with the
 test written out, in the style of the target package, with a comment saying what the slip
 was and what it was verified against — a clause number, or a measurement. Two seams exist
-so that this needs no hardware: `prober` (`wsd/discover.go:177`) for the aggregation path
-and `fakeConn` (`wsd/discover_test.go:19`) for the socket path. Use them; a test that
+so that this needs no hardware: `prober` (`wsd/discover.go:206`) for the aggregation path
+and `fakeConn` (`wsd/discover_test.go:20`) for the socket path. Use them; a test that
 needs an interface belongs behind a `t.Skipf` like `TestListenStopsOnContextCancel`.
 
 Apply the test with the fix, in the same change.
