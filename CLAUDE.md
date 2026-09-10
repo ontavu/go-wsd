@@ -44,9 +44,29 @@ keeps five specialised reviewers in `.claude/agents/`:
 | `go-architect` | The `AGENTS.md` rulebook and design coherence, including the `wsd` dependency boundary and the deliberate decisions (the `prober` seam, the narrow `PacketConn`, finding nothing is not an error). |
 | `cli-ux` | `wsdc` as an interface — flags, usage text, exit codes, the tab-separated output contract — and whether `README.md`, `wsd/doc.go` and `AGENTS.md` still describe the code. |
 
-**All five are read-only** (`disallowedTools: Write, Edit, NotebookEdit`), so they are safe
-to run in parallel on one diff — launch them in a single message. They report; the main
-session applies the fixes.
+**All five report; the main session applies the fixes.** Launch them in a single message —
+they are deliberately non-overlapping, so one diff can go to all of them at once.
+
+**They are not, however, sandboxed, and this file used to claim they were.**
+`disallowedTools: Write, Edit, NotebookEdit` removes the file tools, but all five keep
+`Bash` — they need it for the mechanical checks their own files prescribe, `go list -deps`,
+`go test -race`, `grep -l`, running the built binary — and a shell writes. One of them
+demonstrated it: asked only to review a diff, it used a shell to modify five tracked files,
+including an upper bound on `wsd.Discover`'s collection window that nobody had asked for.
+It was reverted, and the bound was added deliberately afterwards, which is where
+`MaxProbeTimeout` comes from.
+
+Two fixes were measured and rejected. `permissionMode: plan` in an agent's frontmatter is
+accepted and enforces nothing: a reviewer under it still appended to `AGENTS.md`, still ran
+`sed -i` on it, and still created a file, none of it refused. A `PreToolUse` hook *can*
+target them precisely — `agent_id` and `agent_type` are present in the payload of a
+subagent's call and absent from the main session's, which was verified rather than assumed
+— but the policy it would have to encode is either a path judgement that is not airtight or
+an allowlist that costs the reviewers the ability to invent an experiment, and inventing
+experiments is where their best findings come from.
+
+So the guard is procedural, and it is one line. **End a panel run with `git status --short`
+and confirm the diff is only yours.**
 
 They do not all run on the same model, and the split is deliberate. `wsd-protocol` and
 `cli-ux` are pinned to `sonnet`: both work from a checklist their own file spells out, one
