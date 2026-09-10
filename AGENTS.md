@@ -13,10 +13,11 @@ go build ./...
 go vet ./...
 go test -race ./...
 gofmt -l .                      # must print nothing
-go run ./bin/wsdc discover lo   # smoke-test the CLI
+go run ./bin/wsdc discover lo   # smoke-test the CLI on a named interface
+go run ./bin/wsdc discover      # and on whatever the interface policy selects
 ```
 
-`.github/workflows/ci.yml` gates on the first four; the smoke test is run by hand,
+`.github/workflows/ci.yml` gates on the first four; the smoke tests are run by hand,
 since no runner has a device to answer a Probe. `-race` is not optional here: `Listen`
 runs a goroutine per IP family, and both read paths unblock a blocked reader by moving
 its socket deadline from another goroutine.

@@ -36,7 +36,7 @@ insufficient.
 **There are exactly two ways a blocked read is unblocked, one per path. Know which is which.**
 
 1. **Probing moves the read deadline into the past.** `readReplies`
-   (`wsd/discover.go:360`) sets the collection deadline first, *then* starts the watchdog
+   (`wsd/discover.go:389`) sets the collection deadline first, *then* starts the watchdog
    (`:373-381`). The order is the fix for a real bug: started earlier, the watchdog's
    assignment overwrote the deadline it had just set, so an already-cancelled context
    waited out the whole window. The watchdog is retired by `defer close(stop)`.
@@ -52,7 +52,7 @@ insufficient.
    the watchdog and by `defer conn.Close()` at `:86`; that is deliberate and safe.
 
 Check the deadline arithmetic too: `readReplies` takes the earlier of the collection window
-and `ctx.Deadline()` (`wsd/discover.go:361-364`).
+and `ctx.Deadline()` (`wsd/discover.go:398-401`).
 
 ## Lifetime and leaks
 
@@ -69,22 +69,22 @@ and `ctx.Deadline()` (`wsd/discover.go:361-364`).
   (`:155-159`). Without it a cancelled caller that stops reading blocks the reader forever
   and the channel never closes.
 - Every socket is closed on every path: `defer conn.Close()` in `exchange`
-  (`wsd/discover.go:325`) and in the `Listen` goroutine; `dialIPv4`/`dialIPv6` close the
+  (`wsd/discover.go:354`) and in the `Listen` goroutine; `dialIPv4`/`dialIPv6` close the
   underlying connection when setup fails (`wsd/transport/transport.go:129,158`). Check
   hand-written paths.
 - **One IP family failing must never cost the other.** `probe` keeps going and reports an
-  error only when no family could be probed at all (`wsd/discover.go:292-308`);
+  error only when no family could be probed at all (`wsd/discover.go:321-337`);
   `listenerConns` skips a family it cannot join (`wsd/listen.go:124-134`). IPv6 multicast
   is commonly unavailable where IPv6 addresses exist. `TargetsFor`
   (`wsd/transport/transport.go:95`) always attempts IPv4 — an interface can be joinable
   while reporting no address at that instant.
 - **A context that ends mid-window is not an error.** `readReplies` hands back what it had;
-  `probe` reports `ctx.Err()` only when nothing was collected (`wsd/discover.go:309-315`),
+  `probe` reports `ctx.Err()` only when nothing was collected (`wsd/discover.go:338-344`),
   because `discoverOnInterface` returns nil on any error and a deadline expiring used to
   lose every device that had already answered. Preserve that asymmetry.
 - Every `context.Context` must reach the socket and the sleep. `sleep`
-  (`wsd/discover.go:410`) selects on `ctx.Done()`; `transmit` (`:339`) checks it between
-  attempts; `exchange` checks it after dialling (`:327`). A new path reaching for
+  (`wsd/discover.go:447`) selects on `ctx.Done()`; `transmit` checks it between
+  attempts; `exchange` checks it after dialling. A new path reaching for
   `context.Background()` or `context.TODO()` below `main` is a finding.
 
 ## Shared state
@@ -118,5 +118,5 @@ multicast tests skipped, and what that leaves unverified.
 Distinguish **"this is a race"** from **"this is correct today only because of an ordering
 nothing enforces"** — the deadline-before-watchdog ordering in `readReplies` is exactly the
 second kind, and it was a bug once. Where a finding can be pinned, write the test out,
-using the `fakeConn` seam (`wsd/discover_test.go:19`) for anything socket-shaped rather
+using the `fakeConn` seam (`wsd/discover_test.go:20`) for anything socket-shaped rather
 than reaching for a real interface.

@@ -84,7 +84,8 @@ devices, err := wsd.Discover(ctx, "eth0", wsd.ProbeOptions{
 `wsdc` exposes the same thing as `--types`, comma-separated, on the `discover` subcommand:
 
 ```
-wsdc discover eth0                        # every Target Service on the link
+wsdc discover                             # every probeable interface
+wsdc discover eth0                        # every Target Service on that link
 wsdc discover --types onvif-nvt eth0      # only ONVIF video transmitters
 wsdc discover --types '{urn:x}Thing' eth0
 wsdc -h                                   # lists the well-known names
@@ -147,26 +148,59 @@ deadline if you want a bound on the call itself.
 * `bin/wsdc` a CLI tool to wrap `wsd`, built on [cobra](https://github.com/spf13/cobra):
 
   ```
-  wsdc discover eth0        # probe the link, print what answers
-  wsdc listen eth0          # print Hello and Bye until interrupted
+  wsdc discover             # probe every probeable interface, in parallel
+  wsdc discover eth0 wlan0  # probe these two, in parallel
+  wsdc listen               # print Hello and Bye until interrupted
   wsdc completion bash      # a shell completion script, on stdout
   ```
 
-  Flags: `--timeout` (collection window), `--oasis11` (use the `v1.1` flavor), `--all`
-  (keep devices advertising no ONVIF port type), `--types` (comma-separated port types to
-  probe for, see above). All four describe a Probe, so they belong to `discover` and
-  follow it on the command line; `listen` sends no Probe and rejects them.
+  Both verbs take zero or more interface names. Naming none selects every interface a
+  device can plausibly answer on — up, not the loopback, multicast-capable, and not a
+  container, VM or overlay device by name, which is `wsd.ProbeableInterfaceNames` and the
+  same policy [onvif-cli](https://github.com/jfsmig/onvif) applies. A name given
+  explicitly is used whatever the filter would have said, so `wsdc discover lo` works.
+  `--all-interfaces` widens the automatic set; it does nothing when a name is given, and
+  it is not `--all`, which means something else entirely. Interfaces are polled in
+  parallel, so a run costs one collection window *per IP family* rather than one per
+  interface — a dual-stack interface still pays it twice, sequentially, inside `Discover`.
 
-  Exit status: `0` on success, including `no device answered`; `1` when the probe or the
-  listen failed; `2` for a wrong command line — an unknown flag, verb or argument count
-  also prints the usage block on stderr, but a rejected *value* (an unknown `--types` name
-  or `help` topic) prints only the diagnostic, since the block would bury the line naming
-  what is accepted.
+  The fan-out is unbounded on purpose, and the default filter is what keeps it small: one
+  interface on a laptop, eighteen under `--all-interfaces` on a host running containers.
+  The retention caps are per exchange, so that flag multiplies the memory a flooded link
+  can make a run hold by the number of interfaces polled.
 
-  On a `discover` or a `listen`, stdout carries data rows and nothing else, which is what
-  keeps `wsdc discover eth0 | cut -f2` working: `no device answered` is a result and goes
-  to stderr. `--help` and `wsdc completion <shell>` are successes and print on stdout too,
+  Flags: `--timeout` (collection window per IP family, at most 90s), `--oasis11` (use the
+  `v1.1` flavor), `--all` (keep devices advertising no ONVIF port type), `--types`
+  (comma-separated port types to probe for, see above). All four describe a Probe, so they
+  belong to `discover` and follow it on the command line; `listen` sends no Probe and
+  rejects them. `--all-interfaces` is about interface selection rather than the Probe, so
+  both verbs carry it.
+
+  Exit status: `0` on success, including `no device answered`, nothing to poll, and one
+  interface failing while another answers; `1` when *no* interface could be polled at all;
+  `2` for a wrong command line. An unknown flag, verb or argument count also
+  prints the usage block on stderr. A rejected *value* prints only the diagnostic, since the
+  block would bury the line naming what is accepted: a negative `--timeout`, an unknown
+  `--types` name, an unknown `help` topic, `completion` without a shell, and a wrong
+  argument count to `__complete`, whose usage block describes machinery nobody types.
+
+  On a `discover` or a `listen`, stdout carries data rows and nothing else: `no device
+  answered`, and the line naming which interfaces were polled, are results and go to
+  stderr. `--help` and `wsdc completion <shell>` are successes and print on stdout too,
   being what was asked for.
+
+  Two tab-separated row shapes, both led by the interface the device was heard on:
+
+  ```
+  discover  INTERFACE  UUID  DEVICE_SERVICE_URL
+  listen    INTERFACE  TIME  KIND  FROM  UUID  DEVICE_SERVICE_URL
+  ```
+
+  A field the device did not advertise is a literal `-`. **The interface column was
+  prepended**, so `cut -f2` now yields the UUID where it used to yield the device service
+  URL — the field order matches
+  [onvif-cli](https://github.com/jfsmig/onvif)'s deliberately. A device answering on two
+  interfaces prints one row per interface; nothing is de-duplicated across them.
 
 
 ## License
