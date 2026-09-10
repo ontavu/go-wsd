@@ -42,6 +42,17 @@ licence as the package doc comment. The real package doc lives in `wsd/doc.go`; 
 - **`bin/` is source, not build output.** `bin/wsdc/` holds the CLI. Do not add `bin/`
   to `.gitignore` the way most Go templates do — the built binary is ignored as `/wsdc`.
 
+- **An LLM is never an author.** No commit, tag or pull request here carries `Author`,
+  `Co-Authored-By`, or any other trailer naming a language model as one. Authorship claims
+  responsibility for the work and a model holds none — the person who ran it does. Work a
+  model helped with is marked `Assisted-By: <tool>`, with **no email address**: an address
+  is what lets a forge resolve the trailer to an account and count it as a contribution,
+  which is the claim being refused. For Claude Code the line is `Assisted-By: Claude Code`,
+  and it names the tool rather than the model on purpose — a custom trailer is emitted
+  verbatim, so a model name in it would go stale and become a false statement. The line
+  comes from `attribution` in `.claude/settings.json`, not from anything an agent is told
+  to type; do not add an instruction to append it, or it will appear twice.
+
 - **Comments explain why, and cite the spec.** The house style carries clause numbers:
   `SOAP-over-UDP 1.1 section 4`, `SOAP 1.2 Part 1 section 5.2.3`, `ONVIF Core section
   7.3.6`, `RFC 4122`. A comment restating what the next line does is out of place.
