@@ -70,8 +70,25 @@ func Listen(ctx context.Context, interfaceName string) (<-chan Announcement, err
 	if err != nil {
 		return nil, err
 	}
+	return listenWith(ctx, iface, listenerConns)
+}
 
-	conns := listenerConns(iface)
+// opener joins the discovery group on an interface and hands back one connection per
+// family. It exists so that everything below it is reachable without multicast: joining
+// the group is the part a container or a CI runner cannot do, while reading a datagram,
+// unblocking a reader by closing its socket and closing the channel once the readers have
+// stopped are all exercised perfectly well by a plain loopback UDP socket. Without the
+// seam, TestListenStopsOnContextCancel skips wherever no group can be joined and the whole
+// of Listen runs untested behind a green build.
+//
+// It is a parameter rather than a package variable for the reason bin/wsdc/interfaces.go
+// gives for the same choice: a mutable global seam is a data race the moment a test that
+// swaps it runs in parallel with one that reads it.
+type opener func(*net.Interface) []*net.UDPConn
+
+// listenWith is Listen once the interface has been resolved.
+func listenWith(ctx context.Context, iface *net.Interface, open opener) (<-chan Announcement, error) {
+	conns := open(iface)
 	if len(conns) == 0 {
 		return nil, ErrNoListener
 	}
