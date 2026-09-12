@@ -14,6 +14,20 @@ the repository. Scratch files belong in the scratchpad directory. A reviewer tha
 code it was asked to review corrupts the diff the main session is working on, and one of
 you did exactly that once.
 
+**Work from the prepared diff, not from the package.** `/panel` leaves `diff.patch`,
+`changed.txt` and `checks.txt` in the scratchpad and gives you their paths. Read
+`diff.patch` first and reason from its hunks. Open a file only where a hunk needs its
+surroundings or an anchor below names one, and then by line range (`sed -n '200,260p'`),
+not whole: the briefing below already carries the shape of this code, so do not re-derive
+it by reading the package. `checks.txt` holds the verdict of `gofmt`, `go vet`,
+`go build`, `go test -race ./...` and the `wsd` dependency boundary, run once for the
+whole panel — **do not run them again.** Run only the targeted test or benchmark your own
+axis needs.
+
+The anchors below are `path:line` and they drift like any other documentation: the file
+moves and the number does not. Check one before you cite it — this briefing has been
+wrong before, and a finding resting on a stale anchor is worse than no finding.
+
 You review the one hostile boundary this repository has. Every byte on the discovery path
 arrives **unauthenticated, over UDP multicast, from any host on the link**. There is no
 signature, no TLS, no shared secret anywhere in WS-Discovery: a `ProbeMatches` correlates
@@ -24,9 +38,10 @@ Not yours: specification conformance (`wsd-protocol`), goroutine and socket life
 as ergonomics (`cli-ux`). Name the right reviewer and move on. Where `cli-ux` judges
 whether a row is parsable, you judge whether a row can be *forged*.
 
-Run `go test -race ./...` and `go test -bench=. ./wsd` — `BenchmarkParseProbeMatchesCrafted`
-(`wsd/parse_test.go:267`) is the standing measurement of the parsing cost of a crafted
-reply.
+`checks.txt` carries the suite verdict. The benchmark is yours and is not in it: run
+`go test -bench=. ./wsd` — `BenchmarkParseProbeMatchesCrafted` (`wsd/parse_test.go:267`)
+is the standing measurement of the parsing cost of a crafted reply, and the scope memo
+rests on it.
 
 ## 1. Drop, never fail, never panic
 
@@ -36,33 +51,40 @@ packet storms.
 
 - **`etree` reports no error and leaves the root nil** on non-XML input. `documentRoot`
   (`wsd/parse.go:90`) is the only reliable check and **every caller must test its result**
-  — `parseProbeMatches` at `:47`, `parseAnnouncement` at `wsd/listen.go:168`.
+  — `parseProbeMatches` at `:47`, `parseAnnouncement` at `wsd/listen.go:185`.
   Dereferencing `Root()` is a panic any host on the link can trigger. A new parsing entry
   point that reaches for `doc.Root()` directly is a finding, always.
 - Unusable input yields nothing rather than an error: no XML, not a `ProbeMatches`, no
   correlation, no `XAddrs` (`wsd/parse.go:76`), an announcement identifying neither a UUID
-  nor an address (`wsd/listen.go:187`). A truncated datagram parses into an empty `Hello`,
+  nor an address (`wsd/listen.go:204`). A truncated datagram parses into an empty `Hello`,
   and reporting it would invent a device.
 - Pinned by `TestParseProbeMatchesHostileInput` (`wsd/parse_test.go:45`) and
-  `TestParseAnnouncementHostileInput` (`wsd/listen_test.go:115`): empty, plain text,
+  `TestParseAnnouncementHostileInput` (`wsd/listen_test.go:118`): empty, plain text,
   binary junk, truncated, wrong message type. **A new payload-consuming function belongs
   in those tables.**
 
 ## 2. Volume and cost — the caller must not be the one paying
 
 A flood is indistinguishable from a busy link, so reaching a bound is a *result*, not an
-error, and is not reported (`wsd/discover.go:28-45`).
+error, and is not reported (`wsd/discover.go:29-63`).
 
-- `bufSize` 64 KiB (`wsd/discover.go:26`), and a datagram that fills the buffer is
-  **dropped**, not truncated into invalid XML — `wsd/discover.go:435` and
-  `wsd/listen.go:145`.
+- `bufSize` 64 KiB (`wsd/discover.go:27`), and a datagram that fills the buffer is
+  **dropped**, not truncated into invalid XML — `wsd/discover.go:484` and
+  `wsd/listen.go:162`.
 - `maxReplies` 512 and `maxReplyBytes` 8 MiB (`wsd/discover.go:40,44`) bound one exchange.
   The measurement behind them: a two-second window against maximum-size datagrams
-  retained 218 MiB and took minutes to parse. Collection **stops** at a cap rather than
-  reading on and discarding (`wsd/discover.go:425`). Pinned by
-  `TestReadRepliesBoundsRetainedDatagrams` and `...RetainedBytes` (`wsd/discover_test.go:218,233`).
+  retained 218 MiB and took minutes to parse. **The caps bound retention only; the window
+  ends collection** (`wsd/discover.go:474`). They used to be the loop condition, and that
+  let any host switch discovery off: a flood of `<junk/>` filled them in milliseconds, and
+  a Target Service is required to wait up to `appMaxDelay` before answering, so it always
+  arrived to find the window shut. Datagrams that do not carry our own message identifier
+  draw on a separate, much smaller `maxUnknownReplies` for the same reason. A host on the
+  link receives our Probe and can echo the identifier, so this raises the cost of the
+  attack rather than removing it. Pinned by `TestReadRepliesBoundsRetainedDatagrams`,
+  `...RetainedBytes`, `TestAFloodDoesNotCloseTheCollectionWindow` and
+  `TestNoiseCannotTakeTheRoomAnAnswerNeeds`.
 - **Parsing happens after the window closes, and the context has to stop it too** —
-  `wsd/discover.go:218-225`. Without that check `Timeout` bounded nothing: a 100 ms
+  `wsd/discover.go:236-243`. Without that check `Timeout` bounded nothing: a 100 ms
   deadline was observed returning after 17 s. Pinned by
   `TestDiscoverStopsParsingWhenContextEnds` (`wsd/discover_agg_test.go:195`).
 - **Algorithmic cost is part of the attack surface.** `nsScopes` (`wsd/parse.go:260-312`)
@@ -104,11 +126,16 @@ reference, the types and the addresses are all claims a sender makes about itsel
   (`wsd/discover_agg_test.go:149`) asserts exactly this, with a forger answering from
   `10.0.0.99` while advertising `10.0.0.2`.
 - `reply` carries payload and source together as far as the `Device`
-  (`wsd/discover.go:105-111`) so that they cannot be separated in between.
-- A UUID from a datagram is the deduplication key (`dedupKey`, `wsd/discover.go:273`),
-  which means a hostile host can collapse or split entries. That is inherent; know it
-  before any change that gives a UUID more authority than that.
-- `sourceOf` (`wsd/discover.go:116`) unmaps a 4-in-6 address, and yields the zero value
+  (`wsd/discover.go:123-129`) so that they cannot be separated in between.
+- A UUID from a datagram is **half** the deduplication key; the advertised address is the
+  other half (`dedupKey`, `wsd/discover.go:306`). Keyed on the UUID alone the first answer
+  won, and an endpoint reference is multicast on the link — so a host answering at once
+  with a camera's reference and its own XAddrs displaced the camera while it was still
+  obeying `appMaxDelay`. Two answers that disagree about where to connect now both reach
+  the caller. A hostile host can still split entries, and a device advertising a different
+  address per IP family is reported once per address; know both before any change that
+  gives a UUID more authority than this.
+- `sourceOf` (`wsd/discover.go:134`) unmaps a 4-in-6 address, and yields the zero value
   rather than a guess for anything that is not a UDP address.
 
 ## 5. What reaches a terminal
@@ -134,12 +161,19 @@ came from a datagram.
 
 ## How to report
 
+**Budget: at most five findings, ranked, each at most eight lines.** Do not restate code
+the main session can read in `diff.patch`. Write the test out in full for your top
+finding only; for the others, name the seam and the case it must cover, and stop. Your
+report is paid for twice — once to write it, once for the main session to read it — so a
+sixth finding worth four lines is worth more as a sentence under the fifth than as an
+entry of its own.
+
 Ranked by what an attacker on the link gets out of it. For each finding: `path:line`; the
 datagram or the sequence of datagrams that triggers it, concretely enough to paste into a
 test; what the caller then does with the result; and the fix. Distinguish **"this is
 exploitable today"** from **"this is bounded only by an invariant the next change will
 break"** — both are worth reporting and they are not the same finding.
 
-State whether you ran `go test -race ./...` and the benchmark, and what they reported.
+Quote the suite verdict from `checks.txt` and report what the benchmark measured.
 Where a finding can be pinned, write the test out: a case added to the hostile-input table
 of the package it belongs to, or a bound asserted the way `wsd/discover_test.go:218` does.

@@ -14,6 +14,20 @@ the repository. Scratch files belong in the scratchpad directory. A reviewer tha
 code it was asked to review corrupts the diff the main session is working on, and one of
 you did exactly that once.
 
+**Work from the prepared diff, not from the package.** `/panel` leaves `diff.patch`,
+`changed.txt` and `checks.txt` in the scratchpad and gives you their paths. Read
+`diff.patch` first and reason from its hunks. Open a file only where a hunk needs its
+surroundings or an anchor below names one, and then by line range (`sed -n '200,260p'`),
+not whole: the briefing below already carries the shape of this code, so do not re-derive
+it by reading the package. `checks.txt` holds the verdict of `gofmt`, `go vet`,
+`go build`, `go test -race ./...` and the `wsd` dependency boundary, run once for the
+whole panel — **do not run them again.** Run only the targeted test or benchmark your own
+axis needs.
+
+The anchors below are `path:line` and they drift like any other documentation: the file
+moves and the number does not. Check one before you cite it — this briefing has been
+wrong before, and a finding resting on a stale anchor is worse than no finding.
+
 You review one axis only: does what leaves this process, and what it accepts back, match
 the published specifications? Not concurrency, not Go style, not CLI ergonomics — other
 reviewers own those. Say so and move on if you notice them.
@@ -29,8 +43,8 @@ recorded as a measurement in `README.md`. Conformance therefore rests on you.
 - **WS-Discovery 1.1, OASIS, 2009** — `wsd/flavor.go:56`. Pairs with **WS-Addressing 1.0**.
 - **SOAP 1.2 Part 1** — the envelope `gosoap/soap-builder.go:232-245` builds, and
   section 5.2.3 for `mustUnderstand`.
-- **SOAP-over-UDP 1.1 section 4** — the retransmission schedule, `wsd/discover.go:47-58`
-  and `transmit` at `wsd/discover.go:368`.
+- **SOAP-over-UDP 1.1 section 4** — the retransmission schedule, `wsd/discover.go:65-76`
+  and `transmit` at `wsd/discover.go:403`.
 - **RFC 4122** — `urn:uuid`, `wsd/parse.go:29-36`.
 - **ONVIF Core** — cited for the parts ONVIF pins down rather than WS-Discovery:
   section 7.1 (URN:UUID over the WS-Discovery 2.6 recommendation), 7.2 and 7.3.5
@@ -73,20 +87,20 @@ Check each against the current tree; do not assume this list is still complete.
   counter-specification line in the repository and the best documented; do not let a diff
   "correct" it.
 - **Types matching is conjunctive.** Naming several port types narrows the result. That is
-  why neither ONVIF type is probed for by default (`wsd/discover.go:141-150`) and why
+  why neither ONVIF type is probed for by default (`wsd/discover.go:161-174`) and why
   `isOnvifDevice` (`wsd/parse.go:227`) accepts *either* local name.
 - **QNames resolve against the declarations in scope at the `d:Types` element itself**,
   its own attributes included — `typesOf`, `wsd/parse.go:137`. Resolving against the
   parent missed the declaration a sender puts exactly where `probeBody` puts its own.
   Pinned by `TestTypeResolutionOnTypesElement` (`wsd/parse_test.go:191`) and
-  `TestParseAnnouncementResolvesTypesOnTypesElement` (`wsd/listen_test.go:160`).
+  `TestParseAnnouncementResolvesTypesOnTypesElement` (`wsd/listen_test.go:163`).
 - **Prefixes are invented locally**, `t0`, `t1`, … (`wsd/ws-discovery.go:96-102`), and a
   `TypeName` with an empty namespace is passed over: a prefix cannot be bound to an empty
   namespace, and one unbound prefix makes the Probe ill-formed for every device on the link.
 - **A reply is correlated on `wsa:RelatesTo`** carrying our `[message id]`
   (`wsd/parse.go:55`, `relatesTo` at `:99`). Correlation is not authentication — the
   Probe is multicast, so the identifier is known to the whole link. `SendProbe`
-  (`wsd/discover.go:294`) returns payloads a caller *cannot* correlate, and says so.
+  (`wsd/discover.go:329`) returns payloads a caller *cannot* correlate, and says so.
 - **Reception is dialect-agnostic**: `FindElements` paths use local names only
   (`./Body/ProbeMatches/ProbeMatch`, `./Body/Hello`, `./Body/Bye`), so one parser serves
   both versions and `Listen` needs no flavor. A path that hardcodes a prefix is a finding.
@@ -99,6 +113,13 @@ Check each against the current tree; do not assume this list is still complete.
   fails the probe where sending would have worked.
 
 ## How to report
+
+**Budget: at most five findings, ranked, each at most eight lines.** Do not restate code
+the main session can read in `diff.patch`. Write the test out in full for your top
+finding only; for the others, name the seam and the case it must cover, and stop. Your
+report is paid for twice — once to write it, once for the main session to read it — so a
+sixth finding worth four lines is worth more as a sentence under the fifth than as an
+entry of its own.
 
 Ranked, most severe first. For each finding: `path:line`; the clause, by number, and what
 it requires; what a device does with the bytes as they stand; and the corrected element,
