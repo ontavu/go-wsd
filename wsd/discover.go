@@ -267,12 +267,29 @@ func deviceOf(found match, from netip.AddrPort) (Device, bool) {
 	}, true
 }
 
-// dedupKey identifies a device across the repeated probes and the two IP families.
-// The endpoint reference is the stable identifier when the device provides one; the
-// address is the fallback.
+// dedupKey identifies one answer across the repeated probes and the two IP families.
+//
+// The key is the endpoint reference *and* the address it advertises, never the endpoint
+// reference alone. An endpoint reference is a claim, not an identity: it is multicast in
+// every Hello and in every ProbeMatches on the link, so any host can repeat one. Keyed on
+// it alone, the first answer won — and appMaxDelay requires a conformant Target Service to
+// wait before answering, so a host that replied at once with a camera's endpoint reference
+// and its own XAddrs displaced the camera and the caller dialled the forger.
+//
+// The address is what the caller acts on, so that is what has to distinguish two answers.
+// The observed source cannot: it is spoofable over UDP, and a device answering on both
+// families reports two of them for one machine.
+//
+// The cost is that a device advertising a different address per IP family is now reported
+// once per address rather than once. That is the honest result — there really are two
+// service addresses, and this function cannot tell that case from two hosts claiming one
+// identity. A caller that wants one entry per endpoint reference can group by UUID; a
+// caller keyed on UUID alone could not see the conflict at all.
 func dedupKey(found match, device Device) string {
 	if found.UUID != "" {
-		return "uuid:" + found.UUID
+		// NUL cannot occur in either half: an endpoint reference reaching here has been
+		// through documentRoot, and the address through url.Parse.
+		return "uuid:" + found.UUID + "\x00" + device.DeviceServiceURL
 	}
 	return "addr:" + device.Xaddr
 }
