@@ -6,6 +6,9 @@ package wsd
 
 import (
 	"context"
+	"errors"
+	"net"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -212,5 +215,187 @@ func TestListenStopsOnContextCancel(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Error("the channel did not close after cancellation")
+	}
+}
+
+// loopbackConns opens n plain UDP sockets on the loopback address and returns an opener
+// that hands them to listenWith.
+//
+// This is the seam that makes everything below Listen reachable without multicast.
+// Joining the discovery group is the only part a container or a CI runner may refuse;
+// reading a datagram, unblocking a blocked reader by closing its socket, and closing the
+// channel once the readers have stopped are ordinary UDP and work on loopback. Before the
+// seam, TestListenStopsOnContextCancel was the only test that reached Listen at all and it
+// skipped itself wherever no group could be joined, so the whole path could go untested
+// behind a green build.
+func loopbackConns(t *testing.T, n int) ([]*net.UDPConn, opener) {
+	t.Helper()
+
+	conns := make([]*net.UDPConn, 0, n)
+	for range n {
+		conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+		if err != nil {
+			t.Fatalf("opening a loopback socket: %v", err)
+		}
+		conns = append(conns, conn)
+	}
+	return conns, func(*net.Interface) []*net.UDPConn { return conns }
+}
+
+// sendTo delivers one datagram to a socket listenWith is reading, from a separate socket
+// so that the sender is a different address, the way a device on the link would be.
+func sendTo(t *testing.T, conn *net.UDPConn, payload string) {
+	t.Helper()
+
+	sender, err := net.DialUDP("udp4", nil, conn.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatalf("dialling the listener: %v", err)
+	}
+	defer sender.Close()
+
+	if _, err := sender.Write([]byte(payload)); err != nil {
+		t.Fatalf("sending the announcement: %v", err)
+	}
+}
+
+// TestListenDeliversAnnouncementsWithoutMulticast walks the whole of Listen over loopback:
+// the goroutine per connection, readAnnouncements, the parse, and the send on out. It is
+// the coverage TestListenStopsOnContextCancel cannot give wherever it skips.
+func TestListenDeliversAnnouncementsWithoutMulticast(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	conns, open := loopbackConns(t, 2)
+	announcements, err := listenWith(ctx, nil, open)
+	if err != nil {
+		t.Fatalf("listenWith over loopback: %v", err)
+	}
+
+	// The second connection, to prove the fan-out reads every family and not just the
+	// first one opened.
+	sendTo(t, conns[1], helloReply)
+
+	select {
+	case got, open := <-announcements:
+		if !open {
+			t.Fatal("the channel closed instead of delivering the announcement")
+		}
+		if got.Kind != KindHello {
+			t.Errorf("Kind = %v, want Hello", got.Kind)
+		}
+		if got.Device.UUID != "urn:uuid:cam-7" {
+			t.Errorf("UUID = %q, want urn:uuid:cam-7", got.Device.UUID)
+		}
+		if !got.Device.From.IsValid() {
+			t.Error("From is unset; the observed sender is what distinguishes it from the claim in the payload")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no announcement arrived")
+	}
+}
+
+// TestListenReportsNoListener pins the branch a caller cannot otherwise reach without an
+// interface that refuses every family. ErrNoListener is exported precisely so that "no
+// listener could be opened" is distinguishable from net.InterfaceByName failing.
+func TestListenReportsNoListener(t *testing.T) {
+	none := func(*net.Interface) []*net.UDPConn { return nil }
+
+	announcements, err := listenWith(context.Background(), nil, none)
+	if !errors.Is(err, ErrNoListener) {
+		t.Errorf("err = %v, want ErrNoListener", err)
+	}
+	if announcements != nil {
+		t.Error("a failed Listen must not hand back a channel")
+	}
+}
+
+// TestListenClosesChannelOnCancel is TestListenStopsOnContextCancel without the skip: the
+// contract is that cancelling closes out, and it holds whether or not a group was joined.
+func TestListenClosesChannelOnCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	_, open := loopbackConns(t, 2)
+	announcements, err := listenWith(ctx, nil, open)
+	if err != nil {
+		t.Fatalf("listenWith over loopback: %v", err)
+	}
+
+	cancel()
+
+	deadline := time.After(5 * time.Second)
+	for {
+		select {
+		case _, ok := <-announcements:
+			if !ok {
+				return
+			}
+			// A stray datagram is fine; the channel must still close.
+		case <-deadline:
+			t.Fatal("the channel did not close after cancellation")
+		}
+	}
+}
+
+// TestListenClosesEverySocketOnCancel checks that cancelling releases every socket, not
+// just the first. Each call holds one socket and one group membership per IP family, and
+// the doc comment on Listen promises that cancelling is what returns them; a fan-out that
+// closed only one would leak a descriptor per call with nothing to show for it.
+//
+// A second Close on an already-closed UDPConn reports net.ErrClosed, which is how the test
+// tells a released socket from a live one.
+func TestListenClosesEverySocketOnCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	conns, open := loopbackConns(t, 2)
+	announcements, err := listenWith(ctx, nil, open)
+	if err != nil {
+		t.Fatalf("listenWith over loopback: %v", err)
+	}
+
+	cancel()
+	for range announcements { //nolint:revive // drain until close; the close is the signal
+	}
+
+	for i, conn := range conns {
+		if err := conn.Close(); !errors.Is(err, net.ErrClosed) {
+			t.Errorf("connection %d was still open after cancellation: Close returned %v", i, err)
+		}
+	}
+}
+
+// TestListenStopsWhenTheCallerAbandonsTheChannel pins the select on ctx.Done() that
+// readAnnouncements makes while sending. A caller that stops reading and then cancels
+// leaves a reader parked on the send; without the select it parks forever, the WaitGroup
+// never falls and out never closes. That is the leak the Listen doc comment warns about,
+// seen from the inside.
+//
+// The channel is deliberately never read after the datagram is sent: draining it would
+// complete the blocked send and rescue the reader, which is how an earlier version of this
+// test passed with the select deleted. The goroutine count is what shows the difference,
+// and it is the unit the doc comment itself uses — twenty abandoned calls costing a
+// hundred goroutines.
+func TestListenStopsWhenTheCallerAbandonsTheChannel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	conns, open := loopbackConns(t, 1)
+	baseline := runtime.NumGoroutine()
+
+	if _, err := listenWith(ctx, nil, open); err != nil {
+		t.Fatalf("listenWith over loopback: %v", err)
+	}
+
+	sendTo(t, conns[0], helloReply)
+	time.Sleep(100 * time.Millisecond) // let the reader block on the send nobody will read
+
+	cancel()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for runtime.NumGoroutine() > baseline {
+		if time.Now().After(deadline) {
+			t.Fatalf("goroutines never returned to %d (still %d): a caller that abandons "+
+				"the channel leaves the reader parked on an unread send forever",
+				baseline, runtime.NumGoroutine())
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
