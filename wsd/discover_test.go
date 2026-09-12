@@ -177,7 +177,7 @@ func TestTransmitHonoursContext(t *testing.T) {
 func TestReadRepliesCollects(t *testing.T) {
 	conn := &fakeConn{replies: [][]byte{[]byte("one"), []byte("two"), []byte("three")}}
 
-	got, err := readReplies(context.Background(), conn, 50*time.Millisecond)
+	got, err := readReplies(context.Background(), conn, 50*time.Millisecond, "")
 	if err != nil {
 		t.Fatalf("readReplies: %v", err)
 	}
@@ -203,7 +203,7 @@ func TestReadRepliesDropsTruncated(t *testing.T) {
 	}
 	conn := &fakeConn{replies: [][]byte{oversized, []byte("small")}}
 
-	got, err := readReplies(context.Background(), conn, 50*time.Millisecond)
+	got, err := readReplies(context.Background(), conn, 50*time.Millisecond, "")
 	if err != nil {
 		t.Fatalf("readReplies: %v", err)
 	}
@@ -217,9 +217,12 @@ func TestReadRepliesDropsTruncated(t *testing.T) {
 // afterwards, so without the cap an unauthenticated host on the link sets both the
 // memory a probe costs and how long it runs.
 func TestReadRepliesBoundsRetainedDatagrams(t *testing.T) {
-	conn := &fakeConn{endless: []byte("<flood/>")}
+	// Correlated on purpose: these draw on maxReplies, which is the cap under test.
+	// Uncorrelated traffic draws on maxUnknownReplies instead — see
+	// TestNoiseCannotTakeTheRoomAnAnswerNeeds.
+	conn := &fakeConn{endless: []byte("<flood>" + testMessageID + "</flood>")}
 
-	got, err := readReplies(context.Background(), conn, 30*time.Second)
+	got, err := readReplies(context.Background(), conn, 30*time.Second, testMessageID)
 	if err != nil {
 		t.Fatalf("readReplies: %v", err)
 	}
@@ -232,13 +235,13 @@ func TestReadRepliesBoundsRetainedDatagrams(t *testing.T) {
 // does not give: 512 maximum-size datagrams are 32 MiB. A two-second window against a
 // flood of them used to retain 218 MiB, on one IP family of two.
 func TestReadRepliesBoundsRetainedBytes(t *testing.T) {
-	large := make([]byte, 60000)
-	for i := range large {
-		large[i] = 'x'
+	large := []byte("<flood>" + testMessageID + "</flood>")
+	for len(large) < 60000 {
+		large = append(large, 'x')
 	}
 	conn := &fakeConn{endless: large}
 
-	got, err := readReplies(context.Background(), conn, 30*time.Second)
+	got, err := readReplies(context.Background(), conn, 30*time.Second, testMessageID)
 	if err != nil {
 		t.Fatalf("readReplies: %v", err)
 	}
@@ -256,6 +259,127 @@ func TestReadRepliesBoundsRetainedBytes(t *testing.T) {
 	}
 }
 
+// TestAFloodDoesNotCloseTheCollectionWindow pins that the retention caps bound what is
+// kept and never how long the socket is read.
+//
+// They used to be the loop condition, so every datagram counted towards them, junk
+// included — and a Target Service answering a multicast Probe is required to wait a random
+// delay of up to appMaxDelay first. Measured before the fix: 512 copies of "<junk/>" closed
+// a three-second window after 2.99ms, so no conformant device was ever heard and Discover
+// returned an empty result with no error. Any host on the link could switch discovery off
+// with no forgery, no message identifier and no spoofing.
+//
+// It uses a real socket on purpose. fakeConn honours no deadline, so this is the one shape
+// of test that can tell the window from the caps.
+func TestAFloodDoesNotCloseTheCollectionWindow(t *testing.T) {
+	pc, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("no IPv4 loopback: %v", err)
+	}
+	defer pc.Close()
+
+	flood, err := net.Dial("udp4", pc.LocalAddr().String())
+	if err != nil {
+		t.Skipf("cannot reach the loopback socket: %v", err)
+	}
+	defer flood.Close()
+
+	// Correlated on purpose. A host on the link receives our Probe, since it is multicast,
+	// so it can echo the identifier and draw on maxReplies rather than on the much smaller
+	// noise allowance. That is the flood the window itself has to survive: the separate
+	// allowance handles blind junk, and only the loop condition handles this.
+	forged := []byte("<ProbeMatches>" + testMessageID + "</ProbeMatches>")
+
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_, _ = flood.Write(forged)
+			}
+		}
+	}()
+
+	// Long enough to clear appMaxDelay, short enough not to slow the suite.
+	const window = 1200 * time.Millisecond
+	start := time.Now()
+	got, err := readReplies(context.Background(), pc.(*net.UDPConn), window, testMessageID)
+	if err != nil {
+		t.Fatalf("readReplies: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	if elapsed < appMaxDelay {
+		t.Errorf("a flood closed the %v window after %v, before "+
+			"appMaxDelay (%v) had elapsed: a conformant Target Service is never heard",
+			window, elapsed, appMaxDelay)
+	}
+	if len(got) > maxReplies+maxUnknownReplies {
+		t.Errorf("retained %d datagrams, want at most %d: the caps must still bound memory "+
+			"even though they no longer bound the reading", len(got), maxReplies+maxUnknownReplies)
+	}
+}
+
+// TestNoiseCannotTakeTheRoomAnAnswerNeeds is the end-to-end form of the two fixes above,
+// and the one that says whether the attack is actually closed.
+//
+// A host floods the socket with datagrams that are not answers to our Probe, and a Target
+// Service answers after appMaxDelay, which is what the protocol asks it to do. Both fixes
+// are needed for this to pass: with the caps still ending the loop the window closed in
+// milliseconds, and with the window fixed but retention undivided the flood simply filled
+// maxReplies instead, so the late answer was read and dropped. Measured before either fix,
+// and again between them: the camera's reply appeared zero times.
+func TestNoiseCannotTakeTheRoomAnAnswerNeeds(t *testing.T) {
+	pc, err := net.ListenPacket("udp4", "127.0.0.1:0")
+	if err != nil {
+		t.Skipf("no IPv4 loopback: %v", err)
+	}
+	defer pc.Close()
+
+	sender, err := net.Dial("udp4", pc.LocalAddr().String())
+	if err != nil {
+		t.Skipf("cannot reach the loopback socket: %v", err)
+	}
+	defer sender.Close()
+
+	stop := make(chan struct{})
+	defer close(stop)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+				_, _ = sender.Write([]byte("<junk/>"))
+			}
+		}
+	}()
+
+	answer := "<ProbeMatches>" + testMessageID + "</ProbeMatches>"
+	go func() {
+		// Later than appMaxDelay, as a conformant Target Service is required to be.
+		time.Sleep(appMaxDelay + 100*time.Millisecond)
+		_, _ = sender.Write([]byte(answer))
+	}()
+
+	got, err := readReplies(context.Background(), pc.(*net.UDPConn), 2*time.Second, testMessageID)
+	if err != nil {
+		t.Fatalf("readReplies: %v", err)
+	}
+
+	for _, r := range got {
+		if r.payload == answer {
+			return
+		}
+	}
+	t.Errorf("the answer to our own Probe was read after %v of flooding and not retained, "+
+		"so Discover reports an empty link: %d datagrams were kept and none of them was it",
+		appMaxDelay, len(got))
+}
+
 // TestReadRepliesHonoursCancelledContext checks collection stops promptly.
 func TestReadRepliesHonoursCancelledContext(t *testing.T) {
 	conn := &fakeConn{}
@@ -263,7 +387,7 @@ func TestReadRepliesHonoursCancelledContext(t *testing.T) {
 	cancel()
 
 	start := time.Now()
-	if _, err := readReplies(ctx, conn, 30*time.Second); err != nil {
+	if _, err := readReplies(ctx, conn, 30*time.Second, ""); err != nil {
 		t.Fatalf("readReplies: %v", err)
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
@@ -466,7 +590,7 @@ func loopback(t *testing.T) *net.Interface {
 func TestReadRepliesCapsTheWindowAtTheDeadline(t *testing.T) {
 	conn := &fakeConn{}
 	before := time.Now()
-	if _, err := readReplies(context.Background(), conn, 99999*time.Hour); err != nil {
+	if _, err := readReplies(context.Background(), conn, 99999*time.Hour, ""); err != nil {
 		t.Fatalf("readReplies: %v", err)
 	}
 	deadline := conn.firstDeadline()
@@ -492,7 +616,7 @@ func TestReadRepliesCapsTheWindowAtTheDeadline(t *testing.T) {
 func TestReadRepliesReadsOnPastDroppedOversizeDatagrams(t *testing.T) {
 	conn := &fakeConn{endless: make([]byte, bufSize)}
 
-	got, err := readReplies(context.Background(), conn, 30*time.Second)
+	got, err := readReplies(context.Background(), conn, 30*time.Second, "")
 	if err != nil {
 		t.Fatalf("readReplies: %v", err)
 	}
