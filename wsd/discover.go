@@ -8,6 +8,7 @@
 package wsd
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"errors"
@@ -42,6 +43,23 @@ const (
 	// maxReplyBytes bounds the bytes one exchange retains, since maxReplies alone still
 	// admits 512 datagrams of bufSize each.
 	maxReplyBytes = 8 << 20
+
+	// maxUnknownReplies bounds the datagrams retained that do not carry the identifier of
+	// the Probe we sent. They get their own, much smaller allowance so that traffic we
+	// never asked for cannot crowd out the answers we did: a flood of "<junk/>" used to
+	// fill all of maxReplies within milliseconds, and a Target Service is required to wait
+	// a random delay of up to appMaxDelay before answering, so it always arrived to find
+	// the caps full.
+	//
+	// They are retained at all because the test here is a substring search over undecoded
+	// XML, which a conformant reply could in principle escape, and because SendProbe hands
+	// the raw datagrams back uncorrelated.
+	//
+	// This raises the cost of silencing discovery from "send bytes" to "read our Probe and
+	// echo its identifier". It does not remove it: a host on the link receives the Probe,
+	// since it is multicast, and no retention policy can tell that host's answers from a
+	// device's. What the caps must never again decide is when the window ends.
+	maxUnknownReplies = 64
 )
 
 // The retransmission schedule of SOAP-over-UDP 1.1 section 4, which WS-Discovery
@@ -336,7 +354,7 @@ func probe(ctx context.Context, interfaceName string, opts ProbeOptions) (string
 	exchanged := 0
 
 	for _, target := range transport.TargetsFor(iface) {
-		got, err := exchange(ctx, iface, target, message, opts)
+		got, err := exchange(ctx, iface, target, messageID, message, opts)
 		payloads = append(payloads, got...)
 		if err != nil {
 			// One family failing must not lose the other: IPv6 multicast is commonly
@@ -363,7 +381,7 @@ func probe(ctx context.Context, interfaceName string, opts ProbeOptions) (string
 }
 
 // exchange sends the probe on one IP family and collects the replies.
-func exchange(ctx context.Context, iface *net.Interface, target transport.Target, message string, opts ProbeOptions) ([]reply, error) {
+func exchange(ctx context.Context, iface *net.Interface, target transport.Target, messageID, message string, opts ProbeOptions) ([]reply, error) {
 	conn, err := target.Dial(iface, opts.hopLimit())
 	if err != nil {
 		return nil, err
@@ -378,7 +396,7 @@ func exchange(ctx context.Context, iface *net.Interface, target transport.Target
 		return nil, err
 	}
 
-	return readReplies(ctx, conn, opts.timeout())
+	return readReplies(ctx, conn, opts.timeout(), messageID)
 }
 
 // transmit applies the retransmission schedule of SOAP-over-UDP 1.1 section 4.
@@ -403,7 +421,11 @@ func transmit(ctx context.Context, conn transport.PacketConn, dst net.Addr, data
 }
 
 // readReplies collects datagrams until the window closes or the context is done.
-func readReplies(ctx context.Context, conn transport.PacketConn, window time.Duration) ([]reply, error) {
+//
+// wantMessageID is the identifier of the Probe these are answers to. It decides which
+// retention allowance a datagram draws on, never whether it is read; correlation proper
+// happens in parseProbeMatches, over decoded XML.
+func readReplies(ctx context.Context, conn transport.PacketConn, window time.Duration, wantMessageID string) ([]reply, error) {
 	// The ceiling again, at the one place the window becomes a socket deadline.
 	// ProbeOptions.timeout() already applies it, but nothing pins that its only caller
 	// keeps calling it: replacing opts.timeout() with opts.Timeout in exchange leaves the
@@ -435,11 +457,21 @@ func readReplies(ctx context.Context, conn transport.PacketConn, window time.Dur
 	}()
 
 	var result []reply
-	retained := 0
+	matched, unknown, retained := 0, 0, 0
+	wanted := []byte(wantMessageID)
 	buf := make([]byte, bufSize)
-	// Collection also ends at the retention caps. Reading on and discarding would leave
-	// the caller paying for the flood in wakeups and copies without gaining a reply.
-	for len(result) < maxReplies && retained < maxReplyBytes {
+	// The window ends collection; the caps end retention. Ending collection at a cap, as
+	// this used to, let any host on the link switch discovery off: the caps count every
+	// datagram read, junk included, and a Target Service answering a multicast Probe is
+	// required to wait a random delay of up to appMaxDelay first. So 512 copies of
+	// "<junk/>" closed a three-second window after 2.99ms, before a single conformant
+	// device had spoken, and Discover returned no devices and no error.
+	//
+	// Reading on and dropping costs a syscall and a copy per datagram for the rest of the
+	// window. That is the right price: the flood is arriving whether or not this loop
+	// reads it, the sender pays the same cost to produce it, and the alternative is that
+	// the cheapest possible attack defeats the function of the library.
+	for {
 		n, src, err := conn.ReadFrom(buf)
 		if err != nil {
 			// A deadline is how collection ends, whether it expired naturally or was
@@ -453,6 +485,25 @@ func readReplies(ctx context.Context, conn transport.PacketConn, window time.Dur
 			// The datagram filled the buffer, so it may have been truncated into
 			// invalid XML. Dropping it is better than reporting a mangled device.
 			continue
+		}
+		if retained >= maxReplyBytes {
+			// Full. Keep draining to the deadline so that the window still belongs to
+			// the clock rather than to whoever fills these first.
+			continue
+		}
+		// An answer to our own Probe draws on maxReplies; anything else draws on the
+		// much smaller maxUnknownReplies, so that a flood cannot take the room a device
+		// needs when it finally answers.
+		if len(wanted) != 0 && bytes.Contains(buf[:n], wanted) {
+			if matched >= maxReplies {
+				continue
+			}
+			matched++
+		} else {
+			if unknown >= maxUnknownReplies {
+				continue
+			}
+			unknown++
 		}
 		result = append(result, reply{payload: string(buf[:n]), from: sourceOf(src)})
 		retained += n
