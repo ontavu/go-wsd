@@ -8,6 +8,7 @@ import (
 	"context"
 	"math"
 	"net"
+	"net/netip"
 	"os"
 	"sync"
 	"testing"
@@ -379,14 +380,29 @@ func TestDeviceOfPreservesSchemeAndPath(t *testing.T) {
 
 // TestDedupKeyPrefersEndpointReference checks a device reached over both IP families, or
 // answering several probes, is reported once.
-func TestDedupKeyPrefersEndpointReference(t *testing.T) {
-	withUUID := match{UUID: "urn:uuid:cam-1", XAddrs: []string{"http://10.0.0.1/onvif"}}
-	sameDevice := match{UUID: "urn:uuid:cam-1", XAddrs: []string{"http://[fe80::1]/onvif"}}
+func TestDedupKeyPairsTheEndpointReferenceWithItsAddress(t *testing.T) {
+	// The repeated-probe case, which is what deduplication exists for: the same device
+	// answering three attempts says the same thing three times.
+	answer := match{UUID: "urn:uuid:cam-1", XAddrs: []string{"http://10.0.0.1/onvif"}}
+	again := match{UUID: "urn:uuid:cam-1", XAddrs: []string{"http://10.0.0.1/onvif"}}
 
-	first, _ := deviceOf(withUUID, testProbeSource)
-	second, _ := deviceOf(sameDevice, testProbeSource)
-	if dedupKey(withUUID, first) != dedupKey(sameDevice, second) {
-		t.Error("the same endpoint reference must dedupe across addresses")
+	first, _ := deviceOf(answer, testProbeSource)
+	second, _ := deviceOf(again, testProbeSource)
+	if dedupKey(answer, first) != dedupKey(again, second) {
+		t.Error("one device answering twice with the same address must dedupe")
+	}
+
+	// This assertion is the reverse of what it was, deliberately. It used to read "the
+	// same endpoint reference must dedupe across addresses", which made the first answer
+	// win — and an endpoint reference is multicast on the link, so a host that answered
+	// at once with a camera's reference and its own XAddrs displaced the camera while a
+	// conformant device was still waiting out appMaxDelay. Two answers that disagree
+	// about where to connect are two claims, and the library must not pick one.
+	elsewhere := match{UUID: "urn:uuid:cam-1", XAddrs: []string{"http://10.0.0.99/onvif"}}
+	forged, _ := deviceOf(elsewhere, netip.MustParseAddrPort("10.0.0.99:51000"))
+	if dedupKey(answer, first) == dedupKey(elsewhere, forged) {
+		t.Error("two answers claiming one endpoint reference but different addresses must " +
+			"not collapse: the caller dials the address, so the address is what separates them")
 	}
 
 	anon := match{XAddrs: []string{"http://10.0.0.9/onvif"}}

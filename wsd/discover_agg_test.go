@@ -67,19 +67,79 @@ func TestDiscoverDeduplicatesAcrossPayloads(t *testing.T) {
 	two := probeMatchesEnvelope(testProbeID,
 		probeMatchElement("urn:uuid:cam-1", "dn:NetworkVideoTransmitter", "http://[fe80::1]/onvif/device_service"))
 
+	// one is replayed, which is the repeated-probe case: three payloads, two distinct
+	// claims. The replay collapses; the two addresses do not, because this function
+	// cannot tell a dual-stack device from two hosts claiming one endpoint reference,
+	// and silently keeping the earlier of the two is how a forger took a camera's place.
 	got, err := discoverOnInterface(context.Background(), "eth0", ProbeOptions{},
 		fakeProber(testProbeID, one, two, one))
 	if err != nil {
 		t.Fatalf("discoverOnInterface() = %v", err)
 	}
-	if len(got) != 1 {
-		t.Fatalf("got %d devices, want 1: %+v", len(got), got)
+	if len(got) != 2 {
+		t.Fatalf("got %d devices, want 2 — the replay of one must collapse and the two "+
+			"addresses must both survive: %+v", len(got), got)
 	}
-	if got[0].UUID != "urn:uuid:cam-1" {
-		t.Errorf("UUID = %q", got[0].UUID)
+
+	urls := map[string]bool{}
+	for _, device := range got {
+		if device.UUID != "urn:uuid:cam-1" {
+			t.Errorf("UUID = %q", device.UUID)
+		}
+		urls[device.DeviceServiceURL] = true
 	}
-	if got[0].DeviceServiceURL != "http://10.0.0.1/onvif/device_service" {
-		t.Errorf("the first answer must win, got %q", got[0].DeviceServiceURL)
+	for _, want := range []string{
+		"http://10.0.0.1/onvif/device_service",
+		"http://[fe80::1]/onvif/device_service",
+	} {
+		if !urls[want] {
+			t.Errorf("%s was dropped; both claims on this endpoint reference must reach "+
+				"the caller, which is what lets it see that they disagree", want)
+		}
+	}
+}
+
+// TestAForgerDoesNotDisplaceADeviceItImpersonates pins the reason dedupKey carries the
+// advertised address as well as the endpoint reference.
+//
+// An endpoint reference is multicast in every Hello and in every ProbeMatches on the link,
+// so it is not a secret and any host can repeat one. Deduplication used to key on it alone
+// and keep the first answer, while appMaxDelay requires a conformant Target Service to wait
+// before answering — so a host that replied at once with a camera's endpoint reference and
+// its own XAddrs took the camera's place, and the caller went on to dial it.
+func TestAForgerDoesNotDisplaceADeviceItImpersonates(t *testing.T) {
+	const uuid = "urn:uuid:cam-1"
+	const cameraURL = "http://10.0.0.7/onvif/device_service"
+	const forgedURL = "http://10.0.0.99/onvif/device_service"
+
+	forger := netip.MustParseAddrPort("10.0.0.99:51000")
+	camera := netip.MustParseAddrPort("10.0.0.7:3702")
+
+	// The forger answers first, as it always can: it is under no obligation to wait.
+	send := func(context.Context, string, ProbeOptions) (string, []reply, error) {
+		return testProbeID, []reply{
+			{payload: probeMatchesEnvelope(testProbeID,
+				probeMatchElement(uuid, "dn:NetworkVideoTransmitter", forgedURL)), from: forger},
+			{payload: probeMatchesEnvelope(testProbeID,
+				probeMatchElement(uuid, "dn:NetworkVideoTransmitter", cameraURL)), from: camera},
+		}, nil
+	}
+
+	got, err := discoverOnInterface(context.Background(), "eth0", ProbeOptions{}, send)
+	if err != nil {
+		t.Fatalf("discoverOnInterface() = %v", err)
+	}
+
+	var sawCamera bool
+	for _, device := range got {
+		if device.DeviceServiceURL == cameraURL && device.From == camera {
+			sawCamera = true
+		}
+	}
+	if !sawCamera {
+		t.Errorf("the genuine answer from %v was discarded as a duplicate of the forged one: "+
+			"a host answering first must not be able to take an endpoint reference from a "+
+			"device that is obeying appMaxDelay (got %+v)", camera, got)
 	}
 }
 
