@@ -29,93 +29,14 @@ Do not reach for it; `attribution` is checked first and is what this repository 
 
 ### The review panel
 
-CI never sees a device. `.github/workflows/ci.yml` formats, vets, tests and builds, but
-nothing on it can multicast a Probe at a camera or a printer, and the tests that need a
-multicast listener skip themselves when they cannot open one. Every claim about what
-equipment does is either pinned by a test over a canned datagram or recorded as a
-measurement in `README.md`. Correctness therefore rests on review, so this repository
-keeps five specialised reviewers in `.claude/agents/`:
+Six specialised reviewers live in `.claude/agents/`, and `/panel` is how they are run:
+it prepares the diff once, routes it to the reviewers the changed paths implicate, and
+launches only those. **`.claude/PANEL.md` is the full account** — what each owns, why they
+are not sandboxed and what the one procedural guard is, which models they run on and why,
+and the house rule that a finding arrives as a test. Read it before running a review.
 
-| Agent | Owns |
-| --- | --- |
-| `wsd-protocol` | Bytes on the wire: the two WS-Discovery versions, SOAP 1.2 and `mustUnderstand` qualification, WS-Addressing, SOAP-over-UDP §4, `urn:uuid`, QName and namespace resolution, the discovery groups. |
-| `untrusted-input` | The one hostile boundary: parse-and-drop discipline, nil roots, the retention and complexity bounds, which advertised addresses are let through, observed sender versus claimed identity, and what reaches a terminal. |
-| `runtime-safety` | Concurrency and resource lifetime: the two ways a blocked read is unblocked, watchdog ordering, channel close ordering, context propagation, and the sockets and memberships a call holds. |
-| `go-architect` | The `AGENTS.md` rulebook and design coherence, including the `wsd` dependency boundary and the deliberate decisions (the `prober` seam, the narrow `PacketConn`, finding nothing is not an error). |
-| `cli-ux` | `wsdc` as an interface — flags, usage text, exit codes, the tab-separated output contract — and whether `README.md`, `wsd/doc.go` and `AGENTS.md` still describe the code. |
-
-**All five report; the main session applies the fixes.** Launch them in a single message —
-they are deliberately non-overlapping, so one diff can go to all of them at once.
-
-**They are not, however, sandboxed, and this file used to claim they were.**
-`disallowedTools: Write, Edit, NotebookEdit` removes the file tools, but all five keep
-`Bash` — they need it for the mechanical checks their own files prescribe, `go list -deps`,
-`go test -race`, `grep -l`, running the built binary — and a shell writes. One of them
-demonstrated it: asked only to review a diff, it used a shell to modify five tracked files,
-including an upper bound on `wsd.Discover`'s collection window that nobody had asked for.
-It was reverted, and the bound was added deliberately afterwards, which is where
-`MaxProbeTimeout` comes from.
-
-Two fixes were measured and rejected. `permissionMode: plan` in an agent's frontmatter is
-accepted and enforces nothing: a reviewer under it still appended to `AGENTS.md`, still ran
-`sed -i` on it, and still created a file, none of it refused. A `PreToolUse` hook *can*
-target them precisely — `agent_id` and `agent_type` are present in the payload of a
-subagent's call and absent from the main session's, which was verified rather than assumed
-— but the policy it would have to encode is either a path judgement that is not airtight or
-an allowlist that costs the reviewers the ability to invent an experiment, and inventing
-experiments is where their best findings come from.
-
-So the guard is procedural, and it is one line. **End a panel run with `git status --short`
-and confirm the diff is only yours.**
-
-They do not all run on the same model, and the split is deliberate. `wsd-protocol` and
-`cli-ux` are pinned to `sonnet`: both work from a checklist their own file spells out, one
-against clause numbers and one against three documents that drift. The other three stay on
-`inherit`, because their job is to invent the failure rather than look it up — which
-datagram panics the parser, which interleaving races, whether a design belongs here at all.
-Prompt caching does not cover subagents, so each reviewer pays full price for its own
-context on every run; that is what the cheaper pair is buying back. Raise one to `inherit`
-if it starts missing findings, and say in its file why.
-
-### Which to reach for
-
-By what the change touches:
-
-- `wsd/ws-discovery.go`, `wsd/flavor.go`, `wsd/types.go` → `wsd-protocol`
-- `wsd/parse.go` → `wsd-protocol` **and** `untrusted-input`, always: it is both the
-  namespace resolver and the trust filter
-- `wsd/discover.go`, `wsd/listen.go` → `runtime-safety`, and `untrusted-input` if a bound,
-  a cap or a parsed field moved
-- `wsd/transport/` → `runtime-safety` and `wsd-protocol`
-- `bin/wsdc/`, `README.md`, `wsd/doc.go` → `cli-ux`
-- `gosoap/` → `wsd-protocol` for the envelope, `go-architect` for the vendored-code rules
-- a new `.go` file, a new package, interface, exported symbol or dependency →
-  `go-architect`
-- any new `go func`, channel, deadline or socket → `runtime-safety`
-- anything that parses, prints or stores a value taken from a datagram →
-  `untrusted-input`, always
-
-Non-trivial diffs get the whole panel. Do not invoke one to rubber-stamp work another has
-already reviewed — they are deliberately non-overlapping, and each will say so and
-redirect if handed something outside its remit.
-
-### A finding arrives as a test
-
-This repository has a habit worth keeping: the tests are as long as the code, and each one
-records what went wrong once. `TestParseAnnouncementHostileInput` and
-`TestParseProbeMatchesHostileInput` are tables of malformed datagrams;
-`TestReadRepliesBoundsRetainedBytes` pins a retention cap;
-`BenchmarkParseProbeMatchesCrafted` is the standing measurement behind the scope memo;
-`TestProbeMustUnderstandIsQualified` pins one clause of SOAP 1.2;
-`TestDiscoverRecordsReplySource` pins observed-versus-claimed with an actual forger;
-`TestOrDashKeepsHostileFieldsInTheirColumn` pins the terminal-injection filter;
-`TestNoStandardLogger` keeps `gosoap` from reporting to a logger its caller never chose.
-
-So a reviewer's finding is not finished as prose. Where it can be pinned, it comes with the
-test written out, in the style of the target package, with a comment saying what the slip
-was and what it was verified against — a clause number, or a measurement. Two seams exist
-so that this needs no hardware: `prober` (`wsd/discover.go:206`) for the aggregation path
-and `fakeConn` (`wsd/discover_test.go:20`) for the socket path. Use them; a test that
-needs an interface belongs behind a `t.Skipf` like `TestListenStopsOnContextCancel`.
-
-Apply the test with the fix, in the same change.
+It is a separate file on purpose. This one is injected in full into every subagent's
+context — measured, not assumed: a reviewer asked to report what it could see found
+`CLAUDE.md` verbatim and no trace of `AGENTS.md`, whose `@` reference is not expanded for
+a subagent. Orchestration prose here is paid for by every reviewer on every run, so it
+lives where only the main session reads it. Keep this file small for the same reason.
