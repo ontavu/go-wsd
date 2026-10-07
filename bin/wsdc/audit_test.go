@@ -15,7 +15,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ontavu/go-wsd/wsd"
+	"github.com/ontavu/go-wsd/v2/wsd"
 )
 
 // TestDiscoverRowCarriesTheObservedSource — audit A3.

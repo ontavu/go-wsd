@@ -19,7 +19,7 @@ joins or leaves the network. A Probe alone can never observe a departure, so bot
 implemented.
 
 ```go
-import "github.com/ontavu/go-wsd/wsd"
+import "github.com/ontavu/go-wsd/v2/wsd"
 
 // Poll the link. The zero ProbeOptions speaks the dialect ONVIF mandates.
 devices, err := wsd.Discover(ctx, "eth0", wsd.ProbeOptions{})

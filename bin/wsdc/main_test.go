@@ -21,7 +21,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/ontavu/go-wsd/wsd"
+	"github.com/ontavu/go-wsd/v2/wsd"
 )
 
 // TestOrDashKeepsHostileFieldsInTheirColumn is the regression guard for the row this

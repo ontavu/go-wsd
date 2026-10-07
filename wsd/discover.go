@@ -19,7 +19,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/ontavu/go-wsd/wsd/transport"
+	"github.com/ontavu/go-wsd/v2/wsd/transport"
 )
 
 // bufSize bounds a single datagram. Larger replies are dropped rather than silently

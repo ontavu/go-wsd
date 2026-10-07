@@ -10,7 +10,7 @@ import (
 	"sync"
 
 	"github.com/beevik/etree"
-	"github.com/ontavu/go-wsd/wsd/transport"
+	"github.com/ontavu/go-wsd/v2/wsd/transport"
 )
 
 // AnnouncementKind distinguishes the two announcements a Target Service multicasts.

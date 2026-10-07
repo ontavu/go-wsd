@@ -15,7 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/ontavu/go-wsd/wsd"
+	"github.com/ontavu/go-wsd/v2/wsd"
 )
 
 // newDiscoverCmd builds the probe verb. The four flags are declared here rather than on

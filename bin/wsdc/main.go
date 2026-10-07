@@ -29,7 +29,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/ontavu/go-wsd/wsd"
+	"github.com/ontavu/go-wsd/v2/wsd"
 )
 
 // The two cobra verbs this command has to name. Cobra keeps its own unexported copies,

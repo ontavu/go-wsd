@@ -11,7 +11,7 @@ import (
 	"net"
 	"strings"
 
-	"github.com/ontavu/go-wsd/wsd"
+	"github.com/ontavu/go-wsd/v2/wsd"
 )
 
 // The seams that keep this command testable without a network, following prober in

@@ -1,4 +1,4 @@
-module github.com/ontavu/go-wsd
+module github.com/ontavu/go-wsd/v2
 
 go 1.26.7
 

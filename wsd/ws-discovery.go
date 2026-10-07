@@ -12,7 +12,7 @@ import (
 	"strings"
 
 	"github.com/beevik/etree"
-	"github.com/ontavu/go-wsd/gosoap"
+	"github.com/ontavu/go-wsd/v2/gosoap"
 )
 
 // soapEnvelope is the SOAP 1.2 envelope namespace. gosoap declares it at the root under

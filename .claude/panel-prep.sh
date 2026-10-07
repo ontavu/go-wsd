@@ -58,7 +58,7 @@ gofmt_check() {
 # into the build of anyone who only wants to find devices on the link.
 deps_check() {
 	local got want status=0
-	want=$'github.com/ontavu/go-wsd/gosoap\ngithub.com/ontavu/go-wsd/wsd\ngithub.com/ontavu/go-wsd/wsd/transport'
+	want=$'github.com/ontavu/go-wsd/v2/gosoap\ngithub.com/ontavu/go-wsd/v2/wsd\ngithub.com/ontavu/go-wsd/v2/wsd/transport'
 
 	got="$(go list -deps ./wsd | grep ontavu | sort)"
 	if [ "$got" != "$want" ]; then
@@ -67,7 +67,7 @@ deps_check() {
 	fi
 
 	got="$(go list -deps ./gosoap | grep ontavu | sort)"
-	if [ "$got" != "github.com/ontavu/go-wsd/gosoap" ]; then
+	if [ "$got" != "github.com/ontavu/go-wsd/v2/gosoap" ]; then
 		printf 'gosoap is a leaf and must import nothing of ours.\ngot:\n%s\n' "$got"
 		status=1
 	fi
